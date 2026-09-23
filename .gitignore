@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+output/
+ref_img/
+*.py[cod]
+.env
+.env.*
+!.env.example
+analysis/api_smoke_result.json
+.DS_Store
+Thumbs.db

@@ -1,0 +1,7 @@
+numpy==1.26.4
+opencv-python==4.8.1.78
+Pillow>=10.2,<13
+scipy==1.14.1
+fastapi==0.141.1
+uvicorn==0.53.0
+python-multipart==0.0.32

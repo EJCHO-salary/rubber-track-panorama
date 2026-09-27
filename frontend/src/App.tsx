@@ -1,8 +1,9 @@
-import { lazy, Suspense } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { BriefcaseBusiness, ChevronRight, CircleHelp, Layers3, Plus, ScanLine } from 'lucide-react'
+import { BriefcaseBusiness, ChevronRight, CircleHelp, Layers3, Plus, ScanLine, X } from 'lucide-react'
 import { Link, NavLink, Route, Routes, useLocation } from 'react-router'
 import { api, formatDate } from './api'
+import JobDeleteMenu from './components/JobDeleteMenu'
 import styles from './App.module.css'
 
 const Dashboard = lazy(() => import('./pages/Dashboard'))
@@ -15,6 +16,7 @@ const titles: Record<string, { title: string; eyebrow: string }> = {
 }
 
 export default function App() {
+  const [sidebarNotice, setSidebarNotice] = useState('')
   const location = useLocation()
   const page = titles[location.pathname] ?? (location.pathname.startsWith('/samples/')
     ? { title: '샘플 결과', eyebrow: 'WORKSPACE / SAMPLE' }
@@ -40,13 +42,17 @@ export default function App() {
       <div className={styles.sidebarLabel}>최근 작업</div>
       <div className={styles.recent}>
         {recent.length === 0 ? <p className={styles.sidebarEmpty}>아직 생성된 작업이 없습니다.</p> : recent.map(job =>
-          <Link to={`/jobs/${job.id}`} key={job.id} className={styles.recentLink}>
-            <span className={styles.recentDot} data-status={job.status} />
-            <span><strong>{job.settings.width_mm} / {job.settings.pitch_mm} mm</strong><small>{formatDate(job.created_at)}</small></span>
-          </Link>) }
+          <div className={styles.recentRow} key={job.id}>
+            <Link to={`/jobs/${job.id}`} className={styles.recentLink}>
+              <span className={styles.recentDot} data-status={job.status} />
+              <span><strong>{job.settings.width_mm} / {job.settings.pitch_mm} mm</strong><small>{formatDate(job.created_at)}</small></span>
+            </Link>
+            <JobDeleteMenu job={job} sidebar onDeleted={setSidebarNotice} />
+          </div>) }
       </div>
       <div className={styles.sidebarFoot}><Layers3 size={16} /> 팀 공용 작업 공간 <span>INTERNAL</span></div>
     </aside>
+    {sidebarNotice && <div className={styles.sidebarToast} role="status"><span>{sidebarNotice}</span><button aria-label="알림 닫기" onClick={() => setSidebarNotice('')}><X size={16} /></button></div>}
     <div className={styles.content}>
       <header className={styles.topbar}>
         <div><div className={styles.eyebrow}>{page.eyebrow}</div><h1>{page.title}</h1></div>

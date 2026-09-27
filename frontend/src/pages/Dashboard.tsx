@@ -1,11 +1,10 @@
 import { useState } from 'react'
-import * as Dialog from '@radix-ui/react-dialog'
-import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, Check, Clock3, Files, Image as ImageIcon, MoreHorizontal, ScanLine, Trash2, X } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
+import { ArrowRight, Check, Clock3, Files, Image as ImageIcon, ScanLine } from 'lucide-react'
 import { Link } from 'react-router'
 import { api, formatDate, formatNumber, sampleBase } from '../api'
-import type { JobStatus, JobSummary } from '../types'
+import type { JobStatus } from '../types'
+import JobDeleteMenu from '../components/JobDeleteMenu'
 import styles from '../App.module.css'
 
 const statusLabel: Record<JobStatus, string> = {
@@ -13,21 +12,9 @@ const statusLabel: Record<JobStatus, string> = {
 }
 
 export default function Dashboard() {
-  const queryClient = useQueryClient()
-  const [selected, setSelected] = useState<JobSummary | null>(null)
   const [notice, setNotice] = useState('')
-  const [deleteError, setDeleteError] = useState('')
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: api.jobs, refetchInterval: 5000 })
   const samples = useQuery({ queryKey: ['samples'], queryFn: api.samples })
-  const remove = useMutation({ mutationFn: (id: string) => api.deleteJob(id),
-    onSuccess: result => {
-      setNotice(result.pending ? '처리 중인 작업을 중단하고 사진 파일을 삭제하고 있습니다.' : '작업과 원본·결과 사진을 삭제했습니다.')
-      setSelected(null)
-      setDeleteError('')
-      queryClient.invalidateQueries({ queryKey: ['jobs'] })
-    },
-    onError: cause => setDeleteError(cause instanceof Error ? cause.message : '작업을 삭제하지 못했습니다.'),
-  })
   const items = jobs.data?.items ?? []
   const complete = items.filter(job => job.status === 'complete').length
   const active = items.filter(job => job.status === 'queued' || job.status === 'processing').length
@@ -70,24 +57,10 @@ export default function Dashboard() {
                 <span><b className={styles.status} data-status={job.status}>{statusLabel[job.status]}</b></span>
                 <span className={styles.muted}>{formatDate(job.created_at)}</span><ArrowRight size={17} />
               </Link>
-              <DropdownMenu.Root><DropdownMenu.Trigger asChild><button className={styles.jobMenuButton} aria-label={`${job.id.slice(0, 8)} 작업 메뉴`}><MoreHorizontal size={20} /></button></DropdownMenu.Trigger>
-                <DropdownMenu.Portal><DropdownMenu.Content className={styles.jobMenuContent} align="end" sideOffset={5}>
-                  <DropdownMenu.Item className={styles.jobMenuItem} onSelect={() => { setSelected(job); setDeleteError(''); setNotice('') }}><Trash2 size={16} /> 작업 삭제</DropdownMenu.Item>
-                </DropdownMenu.Content></DropdownMenu.Portal>
-              </DropdownMenu.Root>
+              <JobDeleteMenu job={job} onDeleted={setNotice} />
             </div>)}</>}
       </div>
     </section>
-
-    <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open && !remove.isPending) { setSelected(null); setDeleteError('') } }}>
-      <Dialog.Portal><Dialog.Overlay className={styles.dialogOverlay} /><Dialog.Content className={styles.dialogContent}>
-        <div className={styles.dialogTop}><div><span className={styles.kicker}>DELETE JOB</span><Dialog.Title>작업을 삭제할까요?</Dialog.Title></div><Dialog.Close className={styles.dialogClose} aria-label="닫기" disabled={remove.isPending}><X size={20} /></Dialog.Close></div>
-        <Dialog.Description className={styles.dialogDescription}>{selected?.settings.width_mm} / {selected?.settings.pitch_mm} mm 작업의 업로드 원본, 전개 결과, 확대 타일, 분석 보고서를 서버에서 영구 삭제합니다. 삭제 후 복구할 수 없습니다.</Dialog.Description>
-        <div className={styles.deleteJobSummary}><ScanLine size={18} /><div><strong>{selected?.settings.width_mm} / {selected?.settings.pitch_mm} mm</strong><small>{selected?.input_count}장 · 작업 {selected?.id.slice(0, 8)}</small></div></div>
-        {deleteError && <p className={styles.formError} role="alert">{deleteError}</p>}
-        <div className={styles.deleteDialogActions}><Dialog.Close className={styles.ghostButton} disabled={remove.isPending}>취소</Dialog.Close><button className={styles.dangerButton} disabled={remove.isPending || selected === null} onClick={() => selected && remove.mutate(selected.id)}><Trash2 size={16} /> {remove.isPending ? '삭제 중…' : '작업과 사진 삭제'}</button></div>
-      </Dialog.Content></Dialog.Portal>
-    </Dialog.Root>
 
     {samples.data && samples.data.items.length > 0 && <section className={styles.section}>
       <div className={styles.sectionHead}><div><span className={styles.kicker}>REFERENCE WORK</span><h2>검토용 샘플</h2><p>기존 촬영 세트의 합성 결과를 열어볼 수 있습니다.</p></div></div>

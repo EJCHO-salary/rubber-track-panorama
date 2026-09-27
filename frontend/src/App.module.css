@@ -20,3 +20,14 @@
 .dangerButton:hover{background:#8a302b}.dangerButton:disabled{opacity:.55;cursor:not-allowed}
 .actionNotice{background:#ebf5ed;border:1px solid #d8e9dc;color:#2d6843;border-radius:7px;padding:11px 14px;margin:0 0 13px;font-size:12px}
 @media(max-width:950px){.tableHeader,.tableRow{min-width:730px}}
+.recentRow{display:flex;align-items:center;min-width:0;border-radius:8px}
+.recentRow:hover{background:#1d3d32}
+.recentRow .recentLink{flex:1;min-width:0;padding-right:2px}
+.recentRow .recentLink:hover{background:transparent}
+.recentRow .recentLink>span:last-child{min-width:0}
+.recentRow .recentLink strong,.recentRow .recentLink small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recentMenuButton{width:27px;height:29px;margin-right:5px;flex:none;display:grid;place-items:center;border:0;border-radius:6px;background:transparent;color:#80a895}
+.recentMenuButton:hover,.recentMenuButton[data-state=open]{background:#2b5643;color:#fff}
+.sidebarToast{position:fixed;right:24px;bottom:24px;z-index:50;display:flex;align-items:center;gap:16px;max-width:min(420px,calc(100vw - 48px));padding:12px 13px 12px 16px;border:1px solid #c9e4d1;border-radius:9px;background:#eff9f1;box-shadow:0 12px 34px #15392924;color:#285d40;font-size:12px}
+.sidebarToast button{display:grid;place-items:center;width:24px;height:24px;flex:none;border:0;border-radius:5px;background:transparent;color:#5e8268}
+.sidebarToast button:hover{background:#dcefe0}

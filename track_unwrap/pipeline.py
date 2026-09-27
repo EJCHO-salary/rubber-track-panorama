@@ -13,6 +13,7 @@ from .matching import estimate_pitch_shift
 from .composite import merge,illumination_profile,normalize_illumination
 from .front_view import refine_front_view
 from .review import save_review
+from .tiles import save_deepzoom
 
 
 def natural_key(path):
@@ -82,8 +83,6 @@ def unwrap(paths, output_dir, settings: Settings, progress: Callable = print):
             circumference=abs(frames[-1].origin_pitch-(short_shift+closing['median_phase_error_pitch']))
             candidate=abs(integer_origins[-1]-short_shift)
             if candidate>=max(len(f.anchors) for f in frames) and abs(circumference-candidate)<.75 and closing['accepted_matches']>=50 and closing['x_span_fraction']>.5:
-                if settings.total_links is not None and candidate!=settings.total_links:
-                    raise UnwrapError(f"Verified loop has {candidate} links, but {settings.total_links} was supplied.")
                 loop_links=candidate
                 # Integer pitch identity supplies the circumference. Distribute
                 # small accumulated phase drift while fixing the closure phase.
@@ -138,6 +137,11 @@ def unwrap(paths, output_dir, settings: Settings, progress: Callable = print):
     cv2.imwrite(str(out/'panorama.png'),horizontal)
     cv2.imwrite(str(out/'panorama.jpg'),horizontal,[cv2.IMWRITE_JPEG_QUALITY,96])
     save_review(horizontal,out/'review.jpg')
+    tile_warning=None
+    try:
+        save_deepzoom(out/'panorama.jpg',out)
+    except (OSError, MemoryError) as exc:
+        tile_warning=str(exc)
     preview=cv2.resize(horizontal,(min(2200,horizontal.shape[1]),round(horizontal.shape[0]*min(1,2200/horizontal.shape[1]))),interpolation=cv2.INTER_AREA)
     cv2.imwrite(str(out/'preview.jpg'),preview,[cv2.IMWRITE_JPEG_QUALITY,95])
     cv2.imwrite(str(out/'panorama_vertical.jpg'),canvas,[cv2.IMWRITE_JPEG_QUALITY,95])
@@ -145,6 +149,7 @@ def unwrap(paths, output_dir, settings: Settings, progress: Callable = print):
     report={'settings':asdict(settings),'input_count':len(paths),'used_count':len(frames),'skipped_exact_duplicates':skipped,
             'mode':'provided_images' if settings.total_links is None else 'expected_link_count',
             'output_size_wh':[horizontal.shape[1],horizontal.shape[0]],'nominal_pitch_px':pitch,
+            'has_deepzoom':(out/'deepzoom.dzi').is_file(),'tile_warning':tile_warning,
             'observed_span_pitches':round(observed,3),'full_loop_verified':loop_links is not None,
             'verified_loop_links':loop_links,'crop_start_row':crop_start,'rotation':int(rotation),
             'coverage_status':'verified_full_loop' if loop_links is not None else ('provided_images_processed' if settings.total_links is None else 'partial_or_unverified_loop'),
@@ -156,6 +161,7 @@ def unwrap(paths, output_dir, settings: Settings, progress: Callable = print):
     if settings.total_links is not None:
         report['expected_length_mm']=settings.total_links*settings.pitch_mm
         report['unobserved_length_lower_bound_mm']=round(max(0,settings.total_links-observed)*settings.pitch_mm,2)
+        report['input_link_count_disagrees_with_image']=loop_links is not None and loop_links!=settings.total_links
     (out/'quality_report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     provenance={'settings':asdict(settings),'rotation':int(rotation),'crop_start_row':crop_start,
                 'placements':placements,'seams':seams,'images':[{'file':f.name,'source_size_wh':[f.image.shape[1],f.image.shape[0]],

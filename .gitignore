@@ -10,3 +10,8 @@ ref_img/
 analysis/api_smoke_result.json
 .DS_Store
 Thumbs.db
+frontend/node_modules/
+frontend/dist/
+frontend/playwright-report/
+frontend/test-results/
+frontend/*.tsbuildinfo

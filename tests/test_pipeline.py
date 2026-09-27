@@ -11,6 +11,7 @@ from track_unwrap.front_view import refine_front_view
 from track_unwrap.matching import estimate_pitch_shift
 from track_unwrap.pipeline import Settings,natural_key
 from track_unwrap import api
+from track_unwrap.tiles import save_deepzoom
 
 
 @pytest.mark.parametrize('value',[None,'','   '])
@@ -98,3 +99,68 @@ def test_multipart_optional_links(tmp_path,monkeypatch,links):
         assert captured[0][2].total_links==(72 if links=='72' else None)
         assert client.get('/api/jobs/'+response.json()['id']).status_code==200
         assert client.get('/api/jobs/'+response.json()['id']+'/files/secret.txt').status_code==404
+
+
+def test_user_link_override_and_total_length_survive_restart(tmp_path,monkeypatch):
+    monkeypatch.setattr(api,'JOBS',tmp_path)
+    captured=[]
+    monkeypatch.setattr(api.pool,'submit',lambda fn,*args:captured.append(args))
+    buf=BytesIO();Image.new('RGB',(120,160),(90,90,90)).save(buf,format='PNG')
+    with TestClient(api.app) as client:
+        response=client.post('/api/jobs',data={'width_mm':'230','pitch_mm':'48','total_links':''},
+                             files=[('images',('photo.png',buf.getvalue(),'image/png'))])
+        assert response.status_code==202
+        job_id=response.json()['id']
+        api.set_state(job_id,status='complete',result={'settings':{'width_mm':230,'pitch_mm':48,'total_links':None},
+                                                      'full_loop_verified':True,'verified_loop_links':72})
+        first=client.get('/api/jobs/'+job_id).json()
+        assert first['links']['source']=='image'
+        assert first['links']['total_length_mm']==3456
+        edited=client.patch('/api/jobs/'+job_id+'/links',json={'total_links':74}).json()
+        assert edited['links']['total_length_mm']==3552
+        assert edited['links']['disagrees_with_image'] is True
+        assert client.get('/api/jobs').json()['items'][0]['links']['effective_links']==74
+        assert client.patch('/api/jobs/'+job_id+'/links',json={'total_links':0}).status_code==422
+    with TestClient(api.app) as client:
+        assert client.get('/api/jobs/'+job_id).json()['links']['effective_links']==74
+        reset=client.patch('/api/jobs/'+job_id+'/links',json={'total_links':None}).json()
+        assert reset['links']['effective_links']==72
+
+
+def test_partial_photos_do_not_invent_whole_link_count():
+    state={'settings':{'pitch_mm':86,'total_links':None},
+           'result':{'full_loop_verified':False,'verified_loop_links':None,'observed_span_pitches':25.33}}
+    assert api._link_summary(state)['total_length_mm'] is None
+    state['user_total_links']=100
+    assert api._link_summary(state)['total_length_mm']==8600
+
+
+def test_deepzoom_tiles_serve_without_path_traversal(tmp_path,monkeypatch):
+    monkeypatch.setattr(api,'JOBS',tmp_path)
+    job_id='a'*32
+    folder=tmp_path/job_id/'result'
+    folder.mkdir(parents=True)
+    Image.new('RGB',(513,257),(40,70,100)).save(folder/'panorama.jpg')
+    save_deepzoom(folder/'panorama.jpg',folder)
+    with TestClient(api.app) as client:
+        api.jobs[job_id]={'id':job_id,'status':'complete','settings':{'width_mm':230,'pitch_mm':48}}
+        assert client.get(f'/api/jobs/{job_id}/files/deepzoom.dzi').status_code==200
+        assert client.get(f'/api/jobs/{job_id}/files/deepzoom_files/10/0_0.jpg').status_code==200
+        assert client.get(f'/api/jobs/{job_id}/files/deepzoom_files/10/no.jpg').status_code==404
+
+
+def test_queued_work_is_resubmitted_after_restart(tmp_path,monkeypatch):
+    monkeypatch.setattr(api,'JOBS',tmp_path)
+    captured=[]
+    monkeypatch.setattr(api.pool,'submit',lambda fn,*args:captured.append(args))
+    job_id='b'*32
+    folder=tmp_path/job_id/'input'
+    folder.mkdir(parents=True)
+    Image.new('RGB',(120,160),(90,90,90)).save(folder/'001.png')
+    state={'id':job_id,'status':'processing','created_at':'2026-01-01T00:00:00+00:00',
+           'settings':{'width_mm':230,'pitch_mm':48,'total_links':None,'pixels_per_mm':5.0}}
+    (tmp_path/job_id/'job.json').write_text(__import__('json').dumps(state),encoding='utf-8')
+    with TestClient(api.app) as client:
+        assert client.get('/api/jobs/'+job_id).json()['status']=='queued'
+        assert len(captured)==1
+        assert captured[0][0]==job_id

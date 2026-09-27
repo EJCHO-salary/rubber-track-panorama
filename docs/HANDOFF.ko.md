@@ -4,7 +4,7 @@
 
 러버트랙 한 제품의 겹치는 사진을 폭·피치 기준의 단일 표면 전개도로 합성하는 Python 프로토타입입니다. 두 실제 촬영 세트에서 결과를 만들고 연결부를 육안 검토했습니다. 범용 제품 인식이나 정밀 치수 측정 시스템으로 검증한 상태는 아닙니다.
 
-- 입력은 사진, 트랙 폭(mm), 피치(mm), 선택적인 전체 링크 수입니다.
+- 입력은 사진, 트랙 폭(mm), 피치(mm), 선택적인 전체 링크 수입니다. 결과에서 링크 수를 다시 수정하거나 사진 추정값으로 초기화할 수 있습니다.
 - 링크 수 생략·빈 문자열·공백은 모두 미입력으로 처리합니다. 사진으로 확인되는 구간만 출력합니다.
 - 시작과 끝 위치는 사용자에게 요구하지 않습니다. 현재 사진의 촬영 순서는 필요합니다.
 - 중복은 반복 무늬만으로 판단하지 않고 동일 표면의 특징점과 정수 피치 이동으로 판정합니다.
@@ -14,7 +14,7 @@
 
 ## 시작하기
 
-[README](../README.md)의 Python 3.12 설치·실행 명령을 사용합니다. 테스트는 원본 사진 없이 `python -m pytest -q`로 실행할 수 있으며 현재 23개입니다. 서버는 단일 프로세스로 실행하세요.
+[README](../README.md)의 Python 3.12와 Node.js 설치·실행 명령을 사용합니다. 테스트는 원본 사진 없이 `python -m pytest -q`로 실행할 수 있으며 현재 27개입니다. 프론트엔드는 `npm ci --prefix frontend`, `npm run build --prefix frontend`로 빌드합니다. 서버는 단일 프로세스로 실행하세요.
 
 `ref_img/`와 `output/`은 저장소에 포함되지 않습니다. 원본을 전달받으면 README의 CLI 명령으로 샘플 결과를 다시 생성합니다. 이미지 없이 처음 실행해도 업로드 화면을 사용할 수 있습니다.
 
@@ -22,15 +22,17 @@
 
 | 파일 | 역할 |
 | --- | --- |
-| `track_unwrap/api.py` | FastAPI 업로드, 입력 검증, 작업 큐, 상태·파일 조회 |
+| `track_unwrap/api.py` | FastAPI 업로드, 입력 검증, 재시작 복구, 팀 작업 목록, 링크 수 수정, 파일·타일 제공 |
 | `track_unwrap/pipeline.py` | 전체 처리 순서, 링크 폐합, 중복 제거, 출력·출처 기록 |
 | `track_unwrap/geometry.py` | EXIF/방향, 외곽·중앙선·피치 검출, 전경 분할, 정면 재표본화 |
 | `track_unwrap/matching.py` | 양방향 SIFT 매칭, 정수 피치 이동과 위상 추정 |
 | `track_unwrap/front_view.py` | 외곽·중앙선 제약 아래 완만한 기하 보정량 공동 추정 |
 | `track_unwrap/composite.py` | 제한적 조명 보정, 연결 경로 최적화, multiband 합성 |
 | `track_unwrap/review.py` | 단일 결과의 4구간 검토 이미지 |
+| `track_unwrap/tiles.py` | 확대 검사용 Deep Zoom 타일 생성 |
 | `track_unwrap/__main__.py` | CLI와 자연스러운 파일명 정렬 |
-| `web/index.html` | 업로드 및 결과 확인용 한국어 로컬 UI |
+| `frontend/src/` | React/TypeScript 작업 목록, Uppy 업로드, OpenSeadragon 검사, 링크 수 수정 |
+| `web/index.html` | 프론트엔드 빌드가 없을 때 제공하는 구형 대체 화면 |
 | `tests/test_pipeline.py` | 입력·매칭·기하 보정·API 계약 검사 |
 | `analysis/` | 실제 샘플 진단·재현 스크립트, 최초 측정 기록 |
 
@@ -52,12 +54,16 @@
 | 요청 | 설명 |
 | --- | --- |
 | `POST /api/jobs` | multipart: `width_mm`, `pitch_mm`, 선택 `total_links`, 반복 `images`; 업로드된 순서대로 처리 |
+| `GET /api/jobs?limit=50&offset=0` | 최신순 팀 공용 작업 목록과 전체 작업 수 |
 | `GET /api/jobs/{id}` | `queued` → `processing` → `complete` 또는 `needs_review` |
+| `PATCH /api/jobs/{id}/links` | JSON `{ "total_links": 72 }`로 수동 적용, `null`로 사진 추정값 복원 |
 | `GET /api/jobs/{id}/files/{name}` | 허용된 결과 파일만 제공 |
+| `GET /api/jobs/{id}/files/deepzoom_files/{level}/{tile}` | 확대 검사용 JPEG 타일 |
+| `GET /api/samples` | 로컬에 생성된 검토용 샘플 결과 요약 |
 
-완료 응답의 `result.full_loop_verified`, `verified_loop_links`, `coverage_status`로 전체 루프와 부분 결과를 구분합니다. `complete`는 작업 완료이며 모든 표면이 완벽히 복원됐다는 품질 보증이 아닙니다. 입력 링크 수와 확인된 루프가 다르면 검토 대상으로 반환합니다.
+완료 응답의 `result.full_loop_verified`, `verified_loop_links`, `coverage_status`로 전체 루프와 부분 결과를 구분합니다. `links.suggested_links`는 영상에서 한 바퀴를 확인한 경우에만 값이 있고, `links.entered_links`는 사용자가 적용한 값입니다. `links.effective_links`로 `pitch_mm × 링크 수`를 계산합니다. 입력과 사진 추정값이 다르면 `links.disagrees_with_image`가 참이 되며 결과는 보존됩니다. `complete`는 작업 완료이며 모든 표면이 완벽히 복원됐다는 품질 보증이 아닙니다.
 
-최종 파일은 `panorama.png`, `panorama.jpg`, `preview.jpg`, `review.jpg`, `panorama_vertical.jpg`, `quality_report.json`, `provenance.json`입니다. `review.jpg`만 보기 편하게 4구간으로 나눈 이미지입니다.
+최종 파일은 `panorama.png`, `panorama.jpg`, `preview.jpg`, `review.jpg`, `panorama_vertical.jpg`, `quality_report.json`, `provenance.json`, `deepzoom.dzi`, `deepzoom_files/`입니다. `review.jpg`만 보기 편하게 4구간으로 나눈 이미지입니다. CLI 출력에는 링크 수정 API가 적용되지 않으며 업로드 작업의 보고서에는 현재 적용 링크 수가 기록됩니다.
 
 ## 기존 재현 기준
 
@@ -74,7 +80,7 @@
 2. 깊은 중앙 홈과 돌출 표면의 시차. 그림자, 가려진 면, 일부 연결부는 남습니다. 현재 보정은 렌즈 왜곡 계수를 추정한 카메라 캘리브레이션이 아닙니다.
 3. 순서가 섞인 사진, 촬영 방향 반전, 여러 바퀴 반복 촬영의 일반적인 연결 그래프 처리. 현재는 촬영 순서의 인접 매칭과 첫·마지막 폐합을 사용합니다.
 4. 자동 품질 게이트 개선. 외곽의 실제 위치, 연결부 중복·누락, 불확실성을 독립적인 검증 데이터로 평가해야 합니다.
-5. 서비스 운영 전 작업 큐·취소·복구·보관 정책과 메모리 제한. 현재 `ThreadPoolExecutor(max_workers=1)`와 로컬 JSON 상태를 사용합니다. 작업 중 서버 재시작은 재제출 안내로 처리합니다.
-6. 공개 서비스에 필요한 인증·사용자 격리·접근 제어는 아직 없습니다. 현재 데모의 기본 바인딩은 `127.0.0.1`입니다.
+5. 서비스 운영 전 작업 취소·보관 정책과 메모리 제한. 현재 `TRACK_WORKERS`(기본 1, 최대 4) 크기의 로컬 스레드 풀과 JSON 상태를 사용합니다. 서버 재시작 시 입력 파일이 남은 대기·처리 작업을 다시 큐에 넣습니다. 여러 Uvicorn 프로세스나 여러 서버 인스턴스로 확장하는 구조는 아닙니다.
+6. 팀 20명 접근 시 공유 서버와 사내망 접근 제어가 필요합니다. 사용자 요청에 따라 로그인·사용자별 격리는 포함하지 않았습니다. 현재 기본 바인딩은 `127.0.0.1`입니다.
 
 기하 보정이나 연결 코드를 바꾼 뒤에는 합성 데이터 테스트에 더해 실제 원본의 돌기·균열 모양과 연결부 확대를 함께 확인하세요. 대응점 오차만 줄이려다 실제 결함을 휘게 만드는 접근은 피해야 합니다.

@@ -1,5 +1,7 @@
 from io import BytesIO
 from pathlib import Path
+import json
+import threading
 import cv2
 import numpy as np
 import pytest
@@ -164,3 +166,72 @@ def test_queued_work_is_resubmitted_after_restart(tmp_path,monkeypatch):
         assert client.get('/api/jobs/'+job_id).json()['status']=='queued'
         assert len(captured)==1
         assert captured[0][0]==job_id
+
+
+def test_legacy_job_detail_includes_settings_and_photo_count(tmp_path,monkeypatch):
+    monkeypatch.setattr(api,'JOBS',tmp_path)
+    job_id='c'*32
+    folder=tmp_path/job_id
+    folder.mkdir()
+    state={'id':job_id,'status':'complete','message':'완료',
+           'result':{'settings':{'width_mm':230,'pitch_mm':48,'total_links':None},
+                     'input_count':12,'full_loop_verified':True,'verified_loop_links':72}}
+    (folder/'job.json').write_text(json.dumps(state),encoding='utf-8')
+    with TestClient(api.app) as client:
+        detail=client.get('/api/jobs/'+job_id).json()
+        assert detail['settings']['width_mm']==230
+        assert detail['input_count']==12
+        assert detail['links']['total_length_mm']==3456
+
+
+def test_delete_job_removes_originals_outputs_and_history(tmp_path,monkeypatch):
+    monkeypatch.setattr(api,'JOBS',tmp_path)
+    job_id='d'*32
+    folder=tmp_path/job_id
+    (folder/'input').mkdir(parents=True)
+    (folder/'result'/'deepzoom_files'/'10').mkdir(parents=True)
+    (folder/'input'/'001.jpg').write_bytes(b'original')
+    (folder/'result'/'panorama.png').write_bytes(b'output')
+    (folder/'result'/'deepzoom_files'/'10'/'0_0.jpg').write_bytes(b'tile')
+    state={'id':job_id,'status':'complete','created_at':'2026-01-01T00:00:00+00:00',
+           'settings':{'width_mm':230,'pitch_mm':48,'total_links':None}}
+    (folder/'job.json').write_text(json.dumps(state),encoding='utf-8')
+    with TestClient(api.app) as client:
+        deleted=client.delete('/api/jobs/'+job_id)
+        assert deleted.status_code==200
+        assert deleted.json()=={'deleted':True,'pending':False}
+        assert not folder.exists()
+        assert client.get('/api/jobs/'+job_id).status_code==404
+        assert client.get('/api/jobs').json()['total']==0
+        assert client.get(f'/api/jobs/{job_id}/files/panorama.png').status_code==404
+        assert client.delete('/api/jobs/'+job_id).status_code==404
+    with TestClient(api.app) as client:
+        assert client.get('/api/jobs').json()['total']==0
+
+
+def test_delete_processing_job_stops_worker_and_cleans_files(tmp_path,monkeypatch):
+    monkeypatch.setattr(api,'JOBS',tmp_path)
+    started=threading.Event()
+    release=threading.Event()
+    def slow_unwrap(_paths,_folder,_settings,progress):
+        started.set()
+        assert release.wait(5)
+        progress('Rendering:')
+        raise AssertionError('삭제된 작업이 계속 처리됐습니다.')
+    monkeypatch.setattr(api,'unwrap',slow_unwrap)
+    buf=BytesIO();Image.new('RGB',(120,160),(90,90,90)).save(buf,format='PNG')
+    with TestClient(api.app) as client:
+        response=client.post('/api/jobs',data={'width_mm':'230','pitch_mm':'48'},
+                             files=[('images',('photo.png',buf.getvalue(),'image/png'))])
+        job_id=response.json()['id']
+        assert started.wait(5)
+        deleted=client.delete('/api/jobs/'+job_id)
+        assert deleted.status_code==200
+        assert deleted.json()=={'deleted':False,'pending':True}
+        assert client.get('/api/jobs').json()['total']==0
+        assert client.get('/api/jobs/'+job_id).status_code==404
+        release.set()
+        for _ in range(100):
+            if not (tmp_path/job_id).exists():break
+            threading.Event().wait(0.05)
+        assert not (tmp_path/job_id).exists()

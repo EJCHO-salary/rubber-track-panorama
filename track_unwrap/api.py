@@ -2,9 +2,11 @@
 import json
 import os
 import re
+import shutil
 import threading
+import time
 from contextlib import asynccontextmanager
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,10 +25,15 @@ JOBS = ROOT / 'output' / 'jobs'
 pool = ThreadPoolExecutor(max_workers=max(1, min(4, int(os.getenv('TRACK_WORKERS', '1')))), thread_name_prefix='track-worker')
 lock = threading.RLock()
 jobs: dict[str, dict] = {}
+futures: dict[str, Future] = {}
 ARTIFACTS = {'panorama.png', 'panorama.jpg', 'preview.jpg', 'review.jpg', 'panorama_vertical.jpg',
              'quality_report.json', 'provenance.json', 'deepzoom.dzi'}
 SAMPLES = {'case1': 'result', 'case2': 'case2'}
 TILE_PATTERN = re.compile(r'^[0-9]+_[0-9]+\.jpg$')
+
+
+class JobDeleted(Exception):
+    """Stop a worker after its job has been marked for removal."""
 
 
 def parse_links(value):
@@ -87,6 +94,9 @@ def _sync_quality_report(job_id):
 
 def _public_state(state):
     data = dict(state)
+    result = data.get('result') or {}
+    data['settings'] = data.get('settings') or result.get('settings')
+    data['input_count'] = data.get('input_count') or result.get('input_count')
     data['links'] = _link_summary(state)
     if data['status'] == 'queued':
         with lock:
@@ -100,6 +110,8 @@ def _public_state(state):
 
 def set_state(job_id, **values):
     with lock:
+        if jobs[job_id].get('status') == 'deleting' and values.get('status') != 'deleting':
+            raise JobDeleted()
         jobs[job_id].update(values)
         jobs[job_id]['updated_at'] = datetime.now(timezone.utc).isoformat()
         state = dict(jobs[job_id])
@@ -111,8 +123,38 @@ def set_state(job_id, **values):
     return state
 
 
+def _deletion_requested(job_id):
+    with lock:
+        return jobs.get(job_id, {}).get('status') == 'deleting'
+
+
+def _remove_job_files(job_id):
+    root = JOBS.resolve()
+    folder = (JOBS / job_id).resolve()
+    if folder.parent != root:
+        raise ValueError('작업 폴더가 저장 경로 밖에 있습니다.')
+    for attempt in range(3):
+        try:
+            shutil.rmtree(folder)
+            break
+        except FileNotFoundError:
+            break
+        except OSError:
+            if attempt == 2:
+                return False
+            time.sleep(0.2)
+    with lock:
+        jobs.pop(job_id, None)
+        futures.pop(job_id, None)
+    return True
+
+
+def _schedule_job(job_id, paths, settings):
+    with lock:
+        futures[job_id] = pool.submit(run_job, job_id, paths, settings)
+
+
 def run_job(job_id, paths, settings):
-    set_state(job_id, status='processing', message='제품 영역을 확인하고 있습니다.')
     def progress(message):
         labels = {'Geometry:': '외곽과 피치 검출 중', 'Matched ': '겹치는 제품 위치 확인 중',
                   'Front view:': '외곽·중앙선 기준 정면뷰 보정 중', 'Verified loop:': '한 바퀴 중복 구간 확인 완료',
@@ -120,17 +162,30 @@ def run_job(job_id, paths, settings):
         friendly = next((value for prefix, value in labels.items() if message.startswith(prefix)), message)
         set_state(job_id, message=friendly)
     try:
+        set_state(job_id, status='processing', message='제품 영역을 확인하고 있습니다.')
         report = unwrap(paths, JOBS / job_id / 'result', settings, progress)
         set_state(job_id, status='complete', message='전개 사진을 생성했습니다.', result=_compact_result(report))
         _sync_quality_report(job_id)
+    except JobDeleted:
+        pass
     except Exception as exc:
-        set_state(job_id, status='needs_review', message=str(exc))
+        try:
+            set_state(job_id, status='needs_review', message=str(exc))
+        except JobDeleted:
+            pass
+    finally:
+        if _deletion_requested(job_id):
+            _remove_job_files(job_id)
+        else:
+            with lock:
+                futures.pop(job_id, None)
 
 
 def _resume_jobs():
     JOBS.mkdir(parents=True, exist_ok=True)
     with lock:
         jobs.clear()
+        futures.clear()
         for path in JOBS.glob('*/job.json'):
             try:
                 state = json.loads(path.read_text(encoding='utf-8'))
@@ -140,8 +195,11 @@ def _resume_jobs():
                 jobs[state['id']] = state
             except (ValueError, OSError):
                 continue
+        deleting = [state['id'] for state in jobs.values() if state.get('status') == 'deleting']
         pending = sorted((state for state in jobs.values() if state['status'] in {'queued', 'processing'}),
                          key=lambda state: (state.get('created_at', ''), state['id']))
+    for job_id in deleting:
+        _remove_job_files(job_id)
     for state in pending:
         folder = JOBS / state['id'] / 'input'
         paths = sorted((path for path in folder.iterdir() if path.suffix.lower() in {'.jpg', '.jpeg', '.png', '.webp'})) if folder.is_dir() else []
@@ -149,7 +207,7 @@ def _resume_jobs():
             set_state(state['id'], status='needs_review', message='보관된 입력을 찾지 못했습니다. 사진을 다시 제출하세요.')
             continue
         set_state(state['id'], status='queued', message='대기 작업을 복구했습니다.')
-        pool.submit(run_job, state['id'], paths, Settings(**state['settings']))
+        _schedule_job(state['id'], paths, Settings(**state['settings']))
 
 
 @asynccontextmanager
@@ -158,7 +216,7 @@ async def lifespan(_app):
     yield
 
 
-app = FastAPI(title='Rubber Track Unwrapping', version='0.2.0', lifespan=lifespan)
+app = FastAPI(title='Rubber Track Unwrapping', version='0.3.0', lifespan=lifespan)
 
 
 class LinkUpdate(BaseModel):
@@ -208,7 +266,7 @@ async def create_job(width_mm: float = Form(...), pitch_mm: float = Form(...),
                         'created_at': now, 'updated_at': now, 'settings': asdict(settings),
                         'input_names': names, 'input_count': len(paths), 'user_total_links': settings.total_links}
     set_state(job_id)
-    pool.submit(run_job, job_id, paths, settings)
+    _schedule_job(job_id, paths, settings)
     return {'id': job_id, 'status': 'queued'}
 
 
@@ -217,7 +275,8 @@ def list_jobs(limit: int = 50, offset: int = 0):
     if not 1 <= limit <= 100 or offset < 0:
         raise HTTPException(422, '페이지 범위를 확인하세요.')
     with lock:
-        ordered = sorted(jobs.values(), key=lambda state: (state.get('created_at', ''), state['id']), reverse=True)
+        ordered = sorted((state for state in jobs.values() if state.get('status') != 'deleting'),
+                         key=lambda state: (state.get('created_at', ''), state['id']), reverse=True)
         page = [dict(state) for state in ordered[offset:offset + limit]]
     items = []
     for state in page:
@@ -241,7 +300,29 @@ def get_job(job_id: str):
         if not path.is_file():
             raise HTTPException(404)
         state = json.loads(path.read_text(encoding='utf-8'))
+    if state.get('status') == 'deleting':
+        raise HTTPException(404)
     return _public_state(state)
+
+
+@app.delete('/api/jobs/{job_id}')
+def delete_job(job_id: str):
+    _valid_id(job_id)
+    with lock:
+        state = jobs.get(job_id)
+        if state is None:
+            raise HTTPException(404)
+        if state.get('status') == 'deleting':
+            return {'deleted': False, 'pending': True}
+        future = futures.get(job_id)
+        active = future is not None and not future.done()
+        set_state(job_id, status='deleting', message='작업과 파일을 삭제하고 있습니다.')
+        cancelled = future.cancel() if future is not None else False
+    if not active or cancelled:
+        if not _remove_job_files(job_id):
+            raise HTTPException(500, '파일 삭제가 완료되지 않았습니다. 서버 재시작 시 다시 시도합니다.')
+        return {'deleted': True, 'pending': False}
+    return {'deleted': False, 'pending': True}
 
 
 @app.patch('/api/jobs/{job_id}/links')

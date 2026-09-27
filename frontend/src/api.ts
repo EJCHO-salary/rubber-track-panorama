@@ -17,6 +17,7 @@ export const api = {
   updateLinks: (id: string, total_links: number | null) => request<Job>(`/api/jobs/${id}/links`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ total_links }),
   }),
+  deleteJob: (id: string) => request<{ deleted: boolean; pending: boolean }>(`/api/jobs/${id}`, { method: 'DELETE' }),
 }
 
 export function fileBase(jobId: string) { return `/api/jobs/${jobId}/files` }

@@ -15,6 +15,7 @@ type Props = {
   selectedVertex: number | null
   opacity: number
   focusShape: { polygon: Point[]; nonce: number } | null
+  suggestedPolygon: Point[] | null
   onAdd: (point: Point) => void
   onInsert: (index: number, point: Point) => void
   onMoveStart: (index: number) => void
@@ -27,7 +28,7 @@ type Props = {
 }
 
 export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, closedShapes, selectedVertex, opacity,
-  focusShape, onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete, onClose, onClosedMove, onClosedDelete }: Props) {
+  focusShape, suggestedPolygon, onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete, onClose, onClosedMove, onClosedDelete }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<SVGSVGElement>(null)
   const viewer = useRef<OpenSeadragon.Viewer | null>(null)
@@ -198,6 +199,7 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
             onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onClosedDelete(shape.id, vertex) }} />
         })}
       </g>)}
+      {suggestedPolygon && <polygon points={polygon(suggestedPolygon)} className={styles.symmetrySuggestion} />}
       {points.length > 1 && <polyline points={polygon(points)} className={styles.draftLine} />}
       {editing && points.length >= 2 && points.map((point, index) => {
         const next = points[(index + 1) % points.length]

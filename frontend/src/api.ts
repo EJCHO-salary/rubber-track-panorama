@@ -1,4 +1,4 @@
-import type { Job, JobList, Point, SampleList, ZoneAnalysis, ZoneAssistResult, ZoneGroup, ZoneShape } from './types'
+import type { HalfTurnResult, Job, JobList, Point, SampleList, ZoneAnalysis, ZoneAssistResult, ZoneGroup, ZoneShape } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, options)
@@ -24,6 +24,9 @@ export const api = {
   }),
   assistZone: (id: string, polygon: Point[]) => request<ZoneAssistResult>(`/api/jobs/${id}/zones/assist`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ polygon }),
+  }),
+  suggestHalfTurn: (id: string, polygon: Point[], repeat_pitches: number) => request<HalfTurnResult>(`/api/jobs/${id}/zones/half-turn`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ polygon, repeat_pitches }),
   }),
 }
 

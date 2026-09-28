@@ -92,3 +92,9 @@ export interface ZoneAssistResult {
   changed: boolean
   confidence: 'low' | 'medium'
 }
+
+export interface HalfTurnResult {
+  candidates: { polygon: Point[]; score: number; phase_pitches: number }[]
+  pitch_anchor_source: 'image' | 'nominal'
+  reason: string | null
+}

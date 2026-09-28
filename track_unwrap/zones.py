@@ -181,6 +181,91 @@ def _from_pitch(pitch, anchors):
                     np.where(pitch > len(anchors)-1, anchors[-1]+(pitch-len(anchors)+1)*(anchors[-1]-anchors[-2]), values))
 
 
+def suggest_half_turn(result_dir, polygon, repeat_pitches):
+    """Rank 180-degree counterparts in measured pitch space; never save a zone."""
+    image, (width, height), pitch_px, _ = _metadata(result_dir)
+    if isinstance(repeat_pitches, bool) or not isinstance(repeat_pitches, int) or not 1 <= repeat_pitches <= 8:
+        raise ValueError('대칭 제안은 1~8피치 반복 형상에서 사용할 수 있습니다.')
+    if not isinstance(polygon, list) or not 3 <= len(polygon) <= 150:
+        raise ValueError('먼저 도형을 닫아 주세요.')
+    try:
+        pts = np.asarray(polygon, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('형상 좌표를 확인하세요.') from exc
+    if pts.shape != (len(polygon), 2) or not np.isfinite(pts).all() or np.any(pts < 0) or np.any(pts[:, 0] > width) or np.any(pts[:, 1] > height):
+        raise ValueError('형상 좌표가 사진을 벗어났습니다.')
+    if np.ptp(pts[:, 1]) < height * .035:
+        raise ValueError('대칭을 판단하기에 도형 높이가 너무 작습니다.')
+    center_y = float(pts[:, 1].mean())
+    if abs(center_y - height / 2) < height * .12:
+        raise ValueError('중앙 띠의 도형은 반대편 대응을 안정적으로 판단할 수 없습니다.')
+    if pts[:, 1].min() < height / 2 < pts[:, 1].max():
+        raise ValueError('중앙선을 가로지르는 도형은 180° 대응을 제안할 수 없습니다.')
+    anchors, source = _pitch_anchors(image, (width, height), pitch_px)
+    period = repeat_pitches
+    px_per_pitch = 48
+    phase_count = int(np.floor(float(_to_pitch(width, anchors))))
+    tile_width = period * px_per_pitch
+    tiles = phase_count // period
+    if tiles < 3:
+        return {'candidates': [], 'pitch_anchor_source': source, 'reason': '비교할 반복 구간이 부족합니다.'}
+    # Canonical x coordinates remove stitching drift before assessing symmetry.
+    phases = np.arange(tiles * tile_width, dtype=np.float32) / px_per_pitch
+    source_x = (_from_pitch(phases, anchors) * image.shape[1] / width).astype(np.float32)
+    source_y = np.arange(image.shape[0], dtype=np.float32)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    canonical = cv2.remap(gray, np.broadcast_to(source_x, (image.shape[0], len(source_x))),
+                          np.broadcast_to(source_y[:, None], (image.shape[0], len(source_x))),
+                          cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    sy = image.shape[0] / height
+    if center_y > height / 2:
+        y0 = max(0, round((height - pts[:, 1].max()) * sy - image.shape[0] * .03))
+        y1 = min(image.shape[0] // 2, round((height - pts[:, 1].min()) * sy + image.shape[0] * .03))
+    else:
+        y0 = max(0, round(pts[:, 1].min() * sy - image.shape[0] * .03))
+        y1 = min(image.shape[0] // 2, round(pts[:, 1].max() * sy + image.shape[0] * .03))
+    upper = canonical[y0:y1]
+    lower = canonical[image.shape[0]-y1:image.shape[0]-y0]
+    if upper.shape != lower.shape or min(upper.shape) < 12:
+        return {'candidates': [], 'pitch_anchor_source': source, 'reason': '대응 영역이 사진 안에 충분히 보이지 않습니다.'}
+    def edge_tiles(band):
+        band = band.astype(np.float32)
+        dx = cv2.Sobel(band, cv2.CV_32F, 1, 0, ksize=3)
+        dy = cv2.Sobel(band, cv2.CV_32F, 0, 1, ksize=3)
+        edge = cv2.magnitude(dx, dy)
+        return np.median(edge.reshape(edge.shape[0], tiles, tile_width), axis=1)
+    top = edge_tiles(upper)[::-1, ::-1]
+    bottom = edge_tiles(lower)
+    top = (top - top.mean()) / (top.std() + 1e-6)
+    bottom = (bottom - bottom.mean()) / (bottom.std() + 1e-6)
+    scores = np.asarray([float(np.mean(top * np.roll(bottom, offset, axis=1))) for offset in range(tile_width)])
+    if float(np.max(scores)) < .15:
+        return {'candidates': [], 'pitch_anchor_source': source,
+                'reason': '반대편에서 반복되는 180° 대응 패턴을 충분히 찾지 못했습니다.'}
+    candidates = []
+    selected_offsets = []
+    source_pitch = _to_pitch(pts[:, 0], anchors)
+    source_center_pitch = float(source_pitch.mean())
+    for offset in np.argsort(scores)[::-1]:
+        if any(min(abs(int(offset)-used), tile_width-abs(int(offset)-used)) < px_per_pitch * .18 for used in selected_offsets):
+            continue
+        # A shift in the folded image implies p_source + p_target = period - shift.
+        phase_sum = period - int(offset) / px_per_pitch
+        shift_cycles = round((2 * source_center_pitch - phase_sum) / period)
+        target_pitch = phase_sum - source_pitch + shift_cycles * period
+        target_x = _from_pitch(target_pitch, anchors)
+        target_y = height - pts[:, 1]
+        if np.any(target_x < 0) or np.any(target_x > width):
+            continue
+        candidates.append({'polygon': [[round(float(x), 2), round(float(y), 2)] for x, y in zip(target_x, target_y)],
+                           'score': round(float(scores[offset]), 3), 'phase_pitches': round(float(phase_sum % period), 3)})
+        selected_offsets.append(int(offset))
+        if len(candidates) == 3:
+            break
+    return {'candidates': candidates, 'pitch_anchor_source': source,
+            'reason': None if candidates else '사진 안에 표시할 대칭 후보가 없습니다.'}
+
+
 def _draw(mask, authored, polygon, code, repeat, period_pitches, anchors, original_size, placements=None, phase_pitch=None):
     width, height = original_size
     sx, sy = mask.shape[1] / width, mask.shape[0] / height

@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from track_unwrap import api
-from track_unwrap.zones import assist_polygon, build_zones, load_zones
+from track_unwrap import api, zones
+from track_unwrap.zones import assist_polygon, build_zones, load_zones, suggest_half_turn
 
 
 def make_panorama(folder):
@@ -130,6 +130,26 @@ def test_shape_in_default_section_remains_visible_and_measurable(tmp_path):
     assert result['group_metrics']['geometry']['fallback_area_mm2'] < result['group_metrics']['geometry']['areas_mm2']['groove']
 
 
+def test_half_turn_suggestion_uses_pitch_phase_and_does_not_save(tmp_path, monkeypatch):
+    image = np.full((200, 800, 3), 150, np.uint8)
+    top = np.asarray([[10, 20], [34, 20], [34, 48], [25, 48], [25, 75], [10, 75]], np.int32)
+    for shift in range(0, 800, 100):
+        cv2.fillPoly(image, [top + [shift, 0]], (35, 35, 35))
+        mirrored = np.asarray([[75 - x + shift, 200 - y] for x, y in top], np.int32)
+        cv2.fillPoly(image, [mirrored], (35, 35, 35))
+    monkeypatch.setattr(zones, '_metadata', lambda _: (image, (800, 200), 50., 1.))
+    monkeypatch.setattr(zones, '_pitch_anchors', lambda *_: (np.arange(0, 851, 50, dtype=float), 'image'))
+    result = suggest_half_turn(tmp_path, top.astype(float).tolist(), 2)
+    assert result['pitch_anchor_source'] == 'image'
+    assert len(result['candidates']) == 3
+    assert abs(np.mean([p[0] for p in result['candidates'][0]['polygon']]) - 75 + top[:, 0].mean()) < 5
+    assert not (tmp_path / 'zones').exists()
+    with pytest.raises(ValueError, match='중앙'):
+        suggest_half_turn(tmp_path, [[10, 30], [30, 30], [30, 170], [10, 170]], 2)
+    monkeypatch.setattr(zones, '_metadata', lambda _: (np.full_like(image, 150), (800, 200), 50., 1.))
+    assert suggest_half_turn(tmp_path, top.astype(float).tolist(), 2)['candidates'] == []
+
+
 def test_taxonomy_can_be_renamed_and_deleted_and_bad_refs_rejected(tmp_path):
     make_panorama(tmp_path)
     edited = groups()
@@ -203,6 +223,11 @@ def test_api_classification_contract_and_no_auto_damage(tmp_path, monkeypatch):
         saved = client.put(f'/api/jobs/{job_id}/zones', json={'groups': groups(), 'shapes': []})
         assert saved.status_code == 200, saved.text
         assert len(saved.json()['groups']) == 2
+        suggestion = client.post(f'/api/jobs/{job_id}/zones/half-turn', json={
+            'polygon': [[4, 10], [28, 10], [28, 65], [4, 65]], 'repeat_pitches': 2})
+        assert suggestion.status_code == 200, suggestion.text
+        assert isinstance(suggestion.json()['candidates'], list)
+        assert load_zones(result)['shapes'] == []
         assert client.get(f'/api/jobs/{job_id}/zones/groups/process/overlay.png').status_code == 200
         assert client.get(f'/api/jobs/{job_id}/zones/groups/process/authored.png').status_code == 200
         assert client.get(f'/api/jobs/{job_id}/zones/groups/unknown/overlay.png').status_code == 404

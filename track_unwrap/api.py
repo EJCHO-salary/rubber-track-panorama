@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, StrictInt
 
-from .zones import assist_polygon, build_zones, load_zones
+from .zones import assist_polygon, build_zones, load_zones, suggest_half_turn
 from .pipeline import Settings, unwrap
 
 
@@ -242,6 +242,11 @@ class ZoneAssist(BaseModel):
     polygon: list[list[float]]
 
 
+class ZoneHalfTurn(BaseModel):
+    polygon: list[list[float]]
+    repeat_pitches: StrictInt
+
+
 @app.post('/api/jobs', status_code=202)
 async def create_job(width_mm: float = Form(...), pitch_mm: float = Form(...),
                      total_links: str | None = Form(None), images: list[UploadFile] = File(...)):
@@ -423,6 +428,15 @@ def assist_job_zone(job_id: str, request: ZoneAssist):
     result_dir = _zones_dir(job_id)
     try:
         return assist_polygon(result_dir, request.polygon)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post('/api/jobs/{job_id}/zones/half-turn')
+def suggest_job_half_turn(job_id: str, request: ZoneHalfTurn):
+    result_dir = _zones_dir(job_id)
+    try:
+        return suggest_half_turn(result_dir, request.polygon, request.repeat_pitches)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 

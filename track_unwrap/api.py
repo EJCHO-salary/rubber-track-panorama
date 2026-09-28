@@ -15,8 +15,9 @@ from uuid import uuid4
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 
+from .damage import DamageConfig, MODES, add_manual_candidate, analyze_damage, load_analysis, save_analysis
 from .pipeline import Settings, unwrap
 
 
@@ -26,6 +27,7 @@ pool = ThreadPoolExecutor(max_workers=max(1, min(4, int(os.getenv('TRACK_WORKERS
 lock = threading.RLock()
 jobs: dict[str, dict] = {}
 futures: dict[str, Future] = {}
+damage_locks: dict[str, threading.Lock] = {}
 ARTIFACTS = {'panorama.png', 'panorama.jpg', 'preview.jpg', 'review.jpg', 'panorama_vertical.jpg',
              'quality_report.json', 'provenance.json', 'deepzoom.dzi'}
 SAMPLES = {'case1': 'result', 'case2': 'case2'}
@@ -166,6 +168,14 @@ def run_job(job_id, paths, settings):
         report = unwrap(paths, JOBS / job_id / 'result', settings, progress)
         set_state(job_id, status='complete', message='전개 사진을 생성했습니다.', result=_compact_result(report))
         _sync_quality_report(job_id)
+        if not _deletion_requested(job_id):
+            try:
+                analyze_damage(JOBS / job_id / 'result')
+                set_state(job_id, damage_status='ready')
+            except JobDeleted:
+                raise
+            except Exception as exc:
+                set_state(job_id, damage_status='error', damage_message=str(exc))
     except JobDeleted:
         pass
     except Exception as exc:
@@ -221,6 +231,24 @@ app = FastAPI(title='Rubber Track Unwrapping', version='0.3.0', lifespan=lifespa
 
 class LinkUpdate(BaseModel):
     total_links: StrictInt | None = Field(..., description='Positive count, or null to use image suggestion.')
+
+
+class DamageRun(BaseModel):
+    zone_seeds: list[dict] | None = None
+    config: dict | None = None
+
+
+class DamageDecision(BaseModel):
+    included: StrictBool
+
+
+class DamageModes(BaseModel):
+    active_modes: list[str]
+
+
+class ManualDamage(BaseModel):
+    mode: str
+    polygon: list[list[float]]
 
 
 @app.post('/api/jobs', status_code=202)
@@ -365,6 +393,117 @@ def get_artifact(job_id: str, name: str):
 def get_job_tile(job_id: str, level: int, tile: str):
     get_job(job_id)
     return _tile(JOBS / job_id / 'result', level, tile)
+
+
+def _damage_dir(job_id):
+    state = get_job(job_id)
+    if state['status'] != 'complete':
+        raise HTTPException(409, '전개 작업이 완료된 뒤 손상을 분석할 수 있습니다.')
+    return JOBS / job_id / 'result'
+
+
+def _damage_lock(job_id):
+    with lock:
+        return damage_locks.setdefault(job_id, threading.Lock())
+
+
+@app.get('/api/jobs/{job_id}/damage')
+def get_damage(job_id: str):
+    result_dir = _damage_dir(job_id)
+    analysis = load_analysis(result_dir)
+    if analysis is None:
+        raise HTTPException(404, '아직 손상 분석 결과가 없습니다.')
+    return analysis
+
+
+@app.post('/api/jobs/{job_id}/damage')
+def run_damage(job_id: str, request: DamageRun):
+    result_dir = _damage_dir(job_id)
+    task_lock = _damage_lock(job_id)
+    if not task_lock.acquire(blocking=False):
+        raise HTTPException(409, '이 작업의 손상 분석이 이미 진행 중입니다.')
+    try:
+        previous = load_analysis(result_dir)
+        seeds = request.zone_seeds if request.zone_seeds is not None else (previous or {}).get('zone_seeds', [])
+        options = request.config if request.config is not None else (previous or {}).get('config', {})
+        return analyze_damage(result_dir, seeds, DamageConfig(**options))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    finally:
+        task_lock.release()
+
+
+@app.patch('/api/jobs/{job_id}/damage/candidates/{candidate_id}')
+def decide_damage(job_id: str, candidate_id: str, request: DamageDecision):
+    result_dir = _damage_dir(job_id)
+    with _damage_lock(job_id):
+        analysis = load_analysis(result_dir)
+        if analysis is None:
+            raise HTTPException(404, '손상 분석 결과가 없습니다.')
+        item = next((d for d in analysis['candidates'] if d['id'] == candidate_id), None)
+        if item is None:
+            raise HTTPException(404, '손상 후보를 찾을 수 없습니다.')
+        item['included'] = request.included
+        item['reviewed'] = True
+        return save_analysis(result_dir, analysis)
+
+
+@app.patch('/api/jobs/{job_id}/damage/modes')
+def set_damage_modes(job_id: str, request: DamageModes):
+    result_dir = _damage_dir(job_id)
+    modes = request.active_modes
+    if len(set(modes)) != len(modes) or any(mode not in MODES for mode in modes):
+        raise HTTPException(422, 'chunk와 tear 모드 중에서 선택하세요.')
+    with _damage_lock(job_id):
+        analysis = load_analysis(result_dir)
+        if analysis is None:
+            raise HTTPException(404, '손상 분석 결과가 없습니다.')
+        analysis['active_modes'] = modes
+        return save_analysis(result_dir, analysis)
+
+
+@app.post('/api/jobs/{job_id}/damage/candidates')
+def create_manual_damage(job_id: str, request: ManualDamage):
+    result_dir = _damage_dir(job_id)
+    with _damage_lock(job_id):
+        analysis = load_analysis(result_dir)
+        if analysis is None:
+            raise HTTPException(404, '손상 분석 결과가 없습니다.')
+        try:
+            return add_manual_candidate(result_dir, analysis, request.mode, request.polygon)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+
+@app.get('/api/jobs/{job_id}/damage/files/{name}')
+def damage_artifact(job_id: str, name: str):
+    result_dir = _damage_dir(job_id)
+    if name not in {'zone_mask.png', 'anomaly_mask.png', 'zone_preview.jpg', 'zone_review.jpg', 'candidate_review.jpg'}:
+        raise HTTPException(404)
+    path = result_dir / 'damage' / name
+    if not path.is_file():
+        raise HTTPException(404)
+    return FileResponse(path)
+
+
+@app.get('/api/samples/{case_name}/damage')
+def sample_damage(case_name: str):
+    if case_name not in SAMPLES:
+        raise HTTPException(404)
+    analysis = load_analysis(ROOT / 'output' / SAMPLES[case_name])
+    if analysis is None:
+        raise HTTPException(404, '샘플 손상 분석 결과가 없습니다.')
+    return analysis
+
+
+@app.get('/api/samples/{case_name}/damage/files/{name}')
+def sample_damage_artifact(case_name: str, name: str):
+    if case_name not in SAMPLES or name not in {'zone_mask.png', 'anomaly_mask.png', 'zone_preview.jpg', 'zone_review.jpg', 'candidate_review.jpg'}:
+        raise HTTPException(404)
+    path = ROOT / 'output' / SAMPLES[case_name] / 'damage' / name
+    if not path.is_file():
+        raise HTTPException(404)
+    return FileResponse(path)
 
 
 @app.get('/api/samples')

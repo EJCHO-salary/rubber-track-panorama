@@ -96,6 +96,23 @@ def test_two_pitch_examples_do_not_double_density_even_if_seeds_share_cycle(tmp_
     assert mask[30, 64] == mask[30, 164] == 1
 
 
+def test_opposite_half_examples_both_repeat_without_replacing_each_other(tmp_path):
+    make_panorama(tmp_path)
+    taxonomy = groups()[:1]
+    taxonomy[0]['sections'][1]['repeat_mode'] = 'examples'
+    shapes = [
+        {'id': 'upper', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': True,
+         'repeat_pitches': 2, 'polygon': [[4, 10], [10, 10], [10, 55], [4, 55]]},
+        {'id': 'rotated_lower', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': True,
+         'repeat_pitches': 2, 'polygon': [[54, 145], [60, 145], [60, 190], [54, 190]]},
+    ]
+    build_zones(tmp_path, taxonomy, shapes)
+    mask = cv2.imread(str(tmp_path / 'zones' / 'group_geometry_mask.png'), 0)
+    assert all(mask[30, x] == 2 for x in (7, 107, 207, 307))
+    assert all(mask[170, x] == 2 for x in (57, 157, 257, 357))
+    assert mask[30, 57] == mask[170, 7] == 1
+
+
 def test_distinct_long_and_short_grooves_both_repeat_every_two_pitches(tmp_path):
     make_panorama(tmp_path)
     shapes = [
@@ -144,6 +161,18 @@ def test_half_turn_suggestion_uses_pitch_phase_and_does_not_save(tmp_path, monke
     assert len(result['candidates']) == 3
     assert abs(np.mean([p[0] for p in result['candidates'][0]['polygon']]) - 75 + top[:, 0].mean()) < 5
     assert not (tmp_path / 'zones').exists()
+    taxonomy = groups()[:1]
+    taxonomy[0]['sections'][1]['repeat_mode'] = 'examples'
+    seeds = [
+        {'id': 'drawn', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': True,
+         'repeat_pitches': 2, 'polygon': top.astype(float).tolist()},
+        {'id': 'recommended', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': True,
+         'repeat_pitches': 2, 'polygon': result['candidates'][0]['polygon']},
+    ]
+    build_zones(tmp_path, taxonomy, seeds)
+    mask = cv2.imread(str(tmp_path / 'zones' / 'group_geometry_mask.png'), 0)
+    assert all(mask[30, x] == 2 for x in (15, 115, 215, 315))
+    assert all(mask[170, x] == 2 for x in (55, 155, 255, 355))
     with pytest.raises(ValueError, match='중앙'):
         suggest_half_turn(tmp_path, [[10, 30], [30, 30], [30, 170], [10, 170]], 2)
     monkeypatch.setattr(zones, '_metadata', lambda _: (np.full_like(image, 150), (800, 200), 50., 1.))

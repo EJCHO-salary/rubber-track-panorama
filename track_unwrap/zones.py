@@ -303,6 +303,16 @@ def _exemplar_placements(shapes, period_pitches, anchors, width):
                                 int(np.ceil(_to_pitch(width, anchors)/period_pitches))+2)}, phase
 
 
+def _shape_lane(shape, height):
+    """Opposite track halves are complementary motifs, not alternative examples."""
+    center = float(np.mean([point[1] for point in shape['polygon']])) / height
+    if center < .44:
+        return 'upper'
+    if center > .56:
+        return 'lower'
+    return 'center'
+
+
 def load_zones(result_dir):
     path = Path(result_dir) / 'zones' / 'analysis.json'
     if not path.is_file():
@@ -347,11 +357,13 @@ def build_zones(result_dir, groups=None, shapes=None):
                             if shape['group_id'] == group['id'] and shape['section_id'] == section['id'] and shape['repeat']}:
                 peers = [shape for shape in shapes if shape['group_id'] == group['id']
                          and shape['section_id'] == section['id'] and shape['repeat'] and shape['repeat_pitches'] == pitches]
-                exemplar_maps[(section['id'], pitches)] = _exemplar_placements(peers, pitches, anchors, size[0])
+                for lane in {_shape_lane(shape, size[1]) for shape in peers}:
+                    lane_peers = [shape for shape in peers if _shape_lane(shape, size[1]) == lane]
+                    exemplar_maps[(section['id'], pitches, lane)] = _exemplar_placements(lane_peers, pitches, anchors, size[0])
         for shape in shapes:
             if shape['group_id'] == group['id']:
                 if shape['repeat'] and modes[shape['section_id']] == 'examples':
-                    placements, phase = exemplar_maps[(shape['section_id'], shape['repeat_pitches'])]
+                    placements, phase = exemplar_maps[(shape['section_id'], shape['repeat_pitches'], _shape_lane(shape, size[1]))]
                     for target, chosen in placements.items():
                         if chosen == shape['id']:
                             _draw(mask, authored, shape['polygon'], codes[shape['section_id']], True,

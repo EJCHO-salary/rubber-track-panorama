@@ -216,8 +216,8 @@ export default function ZoneWorkspace() {
             {group.sections.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
           {section && <label className={styles.fallbackSelect}>“{section.name}” 반복 방식<select aria-label="반복 방식" value={section.repeat_mode ?? 'independent'}
             onChange={event => updateGroup({ ...group, sections: group.sections.map(item => item.id === section.id ? { ...item, repeat_mode: event.target.value as ZoneSection['repeat_mode'] } : item) })} disabled={busy || editing}>
-            <option value="independent">각 도형을 지정한 간격으로 반복</option><option value="examples">여러 도형 중 한 예시만 선택</option></select>
-            <small>긴 골부와 짧은 골부처럼 모두 보여야 할 형상은 각각 반복합니다. 대체 예시를 그린 경우에만 한 예시 선택을 사용하세요.</small></label>}
+            <option value="independent">각 도형을 지정한 간격으로 반복</option><option value="examples">같은 쪽의 대체 예시만 선택</option></select>
+            <small>중앙선 양쪽의 180° 대응 형상은 모두 반복합니다. 같은 쪽에 그린 대체 예시 사이에서만 하나를 고릅니다.</small></label>}
           <div className={styles.sectionList}>{group.sections.map(item => <div key={item.id} className={styles.sectionRow}>
             <button className={item.id === section?.id ? styles.sectionSelectActive : styles.sectionSelect} onClick={() => { setSectionId(item.id); cancel() }} disabled={busy || editing} title="그릴 섹션 선택"><i style={{ background: item.color }} /><Check size={13} /></button>
             <input key={`${group.id}-${item.id}`} aria-label={`${item.name} 이름 수정`} defaultValue={item.name} maxLength={80} onBlur={event => { if (event.target.value.trim() && event.target.value.trim() !== item.name) updateGroup({ ...group, sections: group.sections.map(section => section.id === item.id ? { ...section, name: event.target.value.trim() } : section) }) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} disabled={busy || editing} />

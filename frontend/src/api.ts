@@ -1,4 +1,4 @@
-import type { DamageAnalysis, DamageMode, Job, JobList, Point, SampleList, ZoneSeed } from './types'
+import type { Job, JobList, Point, SampleList, ZoneAnalysis, ZoneAssistResult, ZoneGroup, ZoneShape } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, options)
@@ -18,24 +18,18 @@ export const api = {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ total_links }),
   }),
   deleteJob: (id: string) => request<{ deleted: boolean; pending: boolean }>(`/api/jobs/${id}`, { method: 'DELETE' }),
-  damage: (id: string) => request<DamageAnalysis>(`/api/jobs/${id}/damage`),
-  analyzeDamage: (id: string, zone_seeds?: ZoneSeed[]) => request<DamageAnalysis>(`/api/jobs/${id}/damage`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ zone_seeds }),
+  zones: (id: string) => request<ZoneAnalysis>(`/api/jobs/${id}/zones`),
+  saveZones: (id: string, groups: ZoneGroup[], shapes: ZoneShape[]) => request<ZoneAnalysis>(`/api/jobs/${id}/zones`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ groups, shapes }),
   }),
-  decideDamage: (id: string, candidateId: string, included: boolean) => request<DamageAnalysis>(`/api/jobs/${id}/damage/candidates/${candidateId}`, {
-    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ included }),
-  }),
-  damageModes: (id: string, active_modes: DamageMode[]) => request<DamageAnalysis>(`/api/jobs/${id}/damage/modes`, {
-    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ active_modes }),
-  }),
-  manualDamage: (id: string, mode: DamageMode, polygon: Point[]) => request<DamageAnalysis>(`/api/jobs/${id}/damage/candidates`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode, polygon }),
+  assistZone: (id: string, polygon: Point[]) => request<ZoneAssistResult>(`/api/jobs/${id}/zones/assist`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ polygon }),
   }),
 }
 
 export function fileBase(jobId: string) { return `/api/jobs/${jobId}/files` }
 export function sampleBase(caseName: string) { return `/samples/${caseName}` }
-export function damageFileBase(jobId: string) { return `/api/jobs/${jobId}/damage/files` }
+export function zoneFileBase(jobId: string, groupId: string) { return `/api/jobs/${jobId}/zones/groups/${groupId}` }
 
 export function formatNumber(value: number) {
   return new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 2 }).format(value)

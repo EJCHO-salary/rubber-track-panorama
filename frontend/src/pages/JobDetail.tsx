@@ -69,7 +69,7 @@ export default function JobDetail({ sample = false }: { sample?: boolean }) {
       <div className={styles.detailMain}>
         {complete ? <TrackViewer base={base} hasTiles={result?.has_deepzoom ?? (sample ? selected!.has_deepzoom : false)} />
           : <div className={styles.placeholderViewer}><ScanLine size={35} /><strong>전개 사진을 준비하고 있습니다.</strong><span>분석이 끝나면 여기에서 확대하여 확인할 수 있습니다.</span></div>}
-        {complete && !sample && <div className={styles.damageEntry}><span className={styles.damageEntryIcon}><ScanSearch size={22} /></span><div><span className={styles.kicker}>DEEP INSPECTION</span><strong>영역과 손상 후보를 함께 검토하세요</strong><p>스프라켓 홀과 중앙부 경계를 수정하고, 청크·티어 후보를 선택하거나 제외할 수 있습니다.</p></div><Link to={`/jobs/${jobId}/analysis`}>심층 분석 열기 <ArrowRight size={16} /></Link></div>}
+        {complete && !sample && <div className={styles.damageEntry}><span className={styles.damageEntryIcon}><ScanSearch size={22} /></span><div><span className={styles.kicker}>REGION EDITOR</span><strong>사진 위에 분류 영역을 지정하세요</strong><p>분류 체계와 세부 섹션을 만들고, 형상을 그려 피치 반복 여부를 선택할 수 있습니다.</p></div><Link to={`/jobs/${jobId}/analysis`}>영역 편집 열기 <ArrowRight size={16} /></Link></div>}
         {complete && <div className={styles.qualityNote}><CheckCircle2 size={18} /><div><strong>{loop ? '한 바퀴의 중복 구간을 확인했습니다.' : '촬영된 구간의 결과입니다.'}</strong><p>{loop ? '첫 사진과 마지막 사진의 동일한 표면을 찾아 겹친 부분을 제거했습니다.' : '첫 사진과 마지막 사진으로 한 바퀴 폐합을 확인하지 못해 전체 링크 수는 제안하지 않습니다.'}</p></div></div>}
       </div>
       <aside className={styles.detailAside}>

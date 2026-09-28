@@ -1,0 +1,145 @@
+import { useEffect, useRef, useState } from 'react'
+import OpenSeadragon from 'openseadragon'
+import { Maximize2, Minus, Plus } from 'lucide-react'
+import type { Point, ZoneAnalysis } from '../types'
+import { fileBase, zoneFileBase } from '../api'
+import styles from '../pages/ZoneWorkspace.module.css'
+
+type Props = {
+  jobId: string
+  groupId: string | null
+  analysis: ZoneAnalysis
+  editing: boolean
+  points: Point[]
+  selectedVertex: number | null
+  opacity: number
+  focusShape: { polygon: Point[]; nonce: number } | null
+  onAdd: (point: Point) => void
+  onInsert: (index: number, point: Point) => void
+  onMoveStart: (index: number) => void
+  onMove: (index: number, point: Point) => void
+  onSelect: (index: number) => void
+  onDelete: (index: number) => void
+}
+
+export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, selectedVertex, opacity,
+  focusShape, onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete }: Props) {
+  const host = useRef<HTMLDivElement>(null)
+  const viewer = useRef<OpenSeadragon.Viewer | null>(null)
+  const dragging = useRef<number | null>(null)
+  const [ready, setReady] = useState(false)
+  const [failed, setFailed] = useState(false)
+  const [size, setSize] = useState({ width: 1, height: 1 })
+  const [, render] = useState(0)
+
+  useEffect(() => {
+    if (!host.current) return
+    const instance = OpenSeadragon({ element: host.current, tileSources: `${fileBase(jobId)}/deepzoom.dzi`,
+      showNavigationControl: false, showNavigator: true, navigatorPosition: 'BOTTOM_RIGHT', animationTime: .2,
+      visibilityRatio: .1, minZoomImageRatio: .3,
+      gestureSettingsMouse: { clickToZoom: false, dblClickToZoom: true, scrollToZoom: true } })
+    viewer.current = instance
+    const update = () => render(value => value + 1)
+    instance.addHandler('animation', update)
+    instance.addHandler('resize', update)
+    instance.addHandler('open', () => {
+      setReady(true)
+      const [width, height] = analysis.image_size_wh
+      const imageHeight = height / width
+      const visibleWidth = imageHeight * 1.12 * (host.current!.clientWidth / host.current!.clientHeight)
+      instance.viewport.fitBounds(new OpenSeadragon.Rect(.5 - visibleWidth / 2, -.06 * imageHeight,
+        visibleWidth, 1.12 * imageHeight), true)
+      update()
+    })
+    instance.addHandler('open-failed', () => setFailed(true))
+    const observer = new ResizeObserver(() => {
+      if (host.current) setSize({ width: host.current.clientWidth, height: host.current.clientHeight })
+      update()
+    })
+    observer.observe(host.current)
+    setSize({ width: host.current.clientWidth, height: host.current.clientHeight })
+    return () => { observer.disconnect(); viewer.current = null; instance.destroy() }
+    // The panorama coordinate system is immutable for the life of this job.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId])
+
+  useEffect(() => { viewer.current?.setMouseNavEnabled(!editing) }, [editing])
+
+  useEffect(() => {
+    if (!ready || !viewer.current || !focusShape?.polygon.length) return
+    const xs = focusShape.polygon.map(point => point[0])
+    const ys = focusShape.polygon.map(point => point[1])
+    const instance = viewer.current
+    const center = instance.viewport.imageToViewportCoordinates(new OpenSeadragon.Point(
+      (Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2))
+    const imageRatio = analysis.image_size_wh[1] / analysis.image_size_wh[0]
+    instance.viewport.zoomTo(Math.max(instance.viewport.getZoom(), 1 / (imageRatio * 1.8)), undefined, true)
+    const bounds = instance.viewport.getBounds(true)
+    instance.viewport.panTo(new OpenSeadragon.Point(
+      Math.max(bounds.width/2, Math.min(1-bounds.width/2, center.x)),
+      Math.max(bounds.height/2, Math.min(imageRatio-bounds.height/2, center.y))), true)
+    instance.viewport.applyConstraints()
+  }, [focusShape, ready, analysis.image_size_wh])
+
+  function project(point: Point): Point {
+    if (!viewer.current || !ready) return [0, 0]
+    const mapped = viewer.current.viewport.imageToViewerElementCoordinates(new OpenSeadragon.Point(...point))
+    return [mapped.x, mapped.y]
+  }
+  function unproject(event: React.PointerEvent | React.MouseEvent): Point | null {
+    if (!host.current || !viewer.current) return null
+    const rect = host.current.getBoundingClientRect()
+    const mapped = viewer.current.viewport.viewerElementToImageCoordinates(
+      new OpenSeadragon.Point(event.clientX - rect.left, event.clientY - rect.top))
+    const [width, height] = analysis.image_size_wh
+    if (mapped.x < 0 || mapped.x >= width || mapped.y < 0 || mapped.y >= height) return null
+    return [Math.round(mapped.x), Math.round(mapped.y)]
+  }
+  const polygon = (items: Point[]) => items.map(point => project(point).join(',')).join(' ')
+  const [imageWidth, imageHeight] = analysis.image_size_wh
+  const left = project([0, 0]), right = project([imageWidth, imageHeight])
+  const grid = editing ? Array.from({ length: Math.min(201, Math.ceil(imageWidth / analysis.pitch_px) + 1) },
+    (_, index) => index * analysis.pitch_px).filter(x => {
+      const screen = project([x, 0])[0]
+      return screen >= -30 && screen <= size.width + 30
+    }) : []
+
+  return <div className={styles.canvasShell}>
+    <div ref={host} className={styles.deepzoom} aria-label="확대 가능한 트랙 전개 사진" />
+    {failed && <div className={styles.canvasFailure}>확대 이미지를 불러오지 못했습니다.</div>}
+    {ready && <svg className={styles.overlay} width={size.width} height={size.height}
+      style={{ pointerEvents: editing ? 'auto' : 'none', cursor: editing ? 'crosshair' : 'default' }}
+      onClick={event => { const point = unproject(event); if (editing && point) onAdd(point) }}>
+      {groupId && <image href={`${zoneFileBase(jobId, groupId)}/overlay.png?v=${encodeURIComponent(analysis.created_at)}`}
+        x={left[0]} y={left[1]} width={right[0]-left[0]} height={right[1]-left[1]}
+        preserveAspectRatio="none" opacity={opacity} pointerEvents="none" />}
+      {grid.map((x, index) => {
+        const a = project([x, 0]), b = project([x, imageHeight])
+        return <line key={index} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} className={styles.pitchGuide} />
+      })}
+      {points.length > 1 && <polyline points={polygon(points)} className={styles.draftLine} />}
+      {points.length >= 3 && <polygon points={polygon(points)} className={styles.draftFill} />}
+      {editing && points.length >= 2 && points.map((point, index) => {
+        const next = points[(index + 1) % points.length]
+        if (index === points.length-1 && points.length < 3) return null
+        const a = project(point), b = project(next)
+        return <line key={`edge-${index}`} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]}
+          className={styles.insertEdge} onClick={event => { event.stopPropagation(); const at = unproject(event); if (at) onInsert(index+1, at) }} />
+      })}
+      {editing && points.map((point, index) => {
+        const [x, y] = project(point)
+        return <circle key={index} cx={x} cy={y} r={selectedVertex === index ? 7 : 6}
+          className={selectedVertex === index ? styles.selectedPoint : styles.draftPoint}
+          onPointerDown={event => { event.stopPropagation(); dragging.current = index; onMoveStart(index); onSelect(index); event.currentTarget.setPointerCapture(event.pointerId) }}
+          onPointerMove={event => { if (dragging.current !== index) return; const at = unproject(event); if (at) onMove(index, at) }}
+          onPointerUp={event => { event.stopPropagation(); dragging.current = null; event.currentTarget.releasePointerCapture(event.pointerId) }}
+          onClick={event => { event.stopPropagation(); onSelect(index) }}
+          onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onDelete(index) }} />
+      })}
+    </svg>}
+    <div className={styles.zoomControls}><button onClick={() => viewer.current?.viewport.zoomBy(1.4)} aria-label="확대"><Plus size={17} /></button>
+      <button onClick={() => viewer.current?.viewport.zoomBy(1/1.4)} aria-label="축소"><Minus size={17} /></button>
+      <button onClick={() => viewer.current?.viewport.goHome()} aria-label="전체 보기"><Maximize2 size={17} /></button></div>
+    <div className={styles.canvasHint}>{editing ? '점을 드래그해 이동 · 선을 눌러 점 추가 · 점에서 오른쪽 클릭해 삭제' : '휠로 확대 · 드래그로 이동'}</div>
+  </div>
+}

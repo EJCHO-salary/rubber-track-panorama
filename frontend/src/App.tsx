@@ -9,7 +9,7 @@ import styles from './App.module.css'
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const NewJob = lazy(() => import('./pages/NewJob'))
 const JobDetail = lazy(() => import('./pages/JobDetail'))
-const DamageWorkspace = lazy(() => import('./pages/DamageWorkspace'))
+const ZoneWorkspace = lazy(() => import('./pages/ZoneWorkspace'))
 
 const titles: Record<string, { title: string; eyebrow: string }> = {
   '/': { title: '작업 개요', eyebrow: 'WORKSPACE / OVERVIEW' },
@@ -20,7 +20,7 @@ export default function App() {
   const [sidebarNotice, setSidebarNotice] = useState('')
   const location = useLocation()
   const page = titles[location.pathname] ?? (location.pathname.endsWith('/analysis')
-    ? { title: '심층 분석', eyebrow: 'WORKSPACE / DEEP INSPECTION' }
+    ? { title: '영역 편집', eyebrow: 'WORKSPACE / REGION EDITOR' }
     : location.pathname.startsWith('/samples/')
     ? { title: '샘플 결과', eyebrow: 'WORKSPACE / SAMPLE' }
     : { title: '작업 결과', eyebrow: 'WORKSPACE / JOB DETAIL' })
@@ -67,7 +67,7 @@ export default function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/new" element={<NewJob />} />
           <Route path="/jobs/:jobId" element={<JobDetail />} />
-          <Route path="/jobs/:jobId/analysis" element={<DamageWorkspace />} />
+          <Route path="/jobs/:jobId/analysis" element={<ZoneWorkspace />} />
           <Route path="/samples/:caseName" element={<JobDetail sample />} />
           <Route path="*" element={<div className={styles.notFound}><CircleHelp size={26} /><h2>페이지를 찾지 못했습니다.</h2><Link to="/">작업 목록으로 돌아가기</Link></div>} />
         </Routes>

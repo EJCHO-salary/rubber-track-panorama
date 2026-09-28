@@ -60,49 +60,33 @@ export interface Sample {
 export type JobList = { items: JobSummary[]; total: number }
 export type SampleList = { items: Sample[] }
 
-export type DamageZone = 'tread' | 'groove' | 'sprocket_hole' | 'embedded_core'
-export type DamageMode = 'chunk' | 'tear'
 export type Point = [number, number]
 
-export interface ZoneSeed {
-  zone: DamageZone
-  polygon: Point[]
-}
-
-export interface DamageCandidate {
+export interface ZoneSection { id: string; name: string; color: string }
+export interface ZoneGroup { id: string; name: string; default_section_id: string; sections: ZoneSection[] }
+export interface ZoneShape {
   id: string
-  mode: DamageMode
-  zone: DamageZone
-  source: 'auto' | 'manual'
-  included: boolean
-  reviewed: boolean
-  auto_reason: string | null
-  area_mm2: number
-  length_mm: number
-  width_mm: number
-  bbox_xywh: [number, number, number, number]
+  group_id: string
+  section_id: string
   polygon: Point[]
-  zone_area_mm2: Partial<Record<DamageZone, number>>
+  repeat: boolean
+  repeat_pitches: number
 }
 
-export interface DamageMetric {
-  visible_area_mm2: number
-  damaged_area_mm2: number
-  damage_percent: number
-  chunk_count: number
-  tear_count: number
-}
-
-export interface DamageAnalysis {
+export interface ZoneAnalysis {
   version: number
   created_at: string
   image_size_wh: [number, number]
-  nominal_pixels_per_mm: number
   pitch_px: number
-  zone_seeds: ZoneSeed[]
-  zone_detection: { confidence: 'low' | 'medium' | 'high'; hole_components_per_pitch: number; central_band_fraction: [number, number] }
-  candidates: DamageCandidate[]
-  active_modes: DamageMode[]
-  summary: { zones: Record<DamageZone, DamageMetric>; total: DamageMetric; excluded_count: number; pending_review_count: number }
-  review_status: 'unverified_auto_candidates' | 'manually_reviewed'
+  nominal_pixels_per_mm: number
+  working_pixels_per_mm: number
+  groups: ZoneGroup[]
+  shapes: ZoneShape[]
+  group_metrics: Record<string, { areas_mm2: Record<string, number>; fallback_area_mm2: number; unassigned_pixels: number; coverage_percent: number }>
+}
+
+export interface ZoneAssistResult {
+  polygon: Point[]
+  changed: boolean
+  confidence: 'low' | 'medium'
 }

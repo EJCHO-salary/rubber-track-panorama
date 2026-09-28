@@ -95,14 +95,16 @@ def _hole_template(template: np.ndarray, top: int, bottom: int):
     boxes = []
     for i in range(1, count):
         x, y, w, hh, area = stats[i]
-        if area < max(24, .001 * h * p) or w < 3 or hh < 3:
+        if area < max(24, .001 * h * p) or w < max(3, .08 * p) or hh < 3:
             continue
         if area / (w * hh) < .3 or w > .8 * p or hh > .22 * h:
             continue
-        found[labels == i] = 1
+        # Dark shading often traces only three sides of a rectangular recess.
+        # Treat its interior as the hole, while keeping the outer rim in core.
+        inset_x = min(max(1, round(.01 * p)), max(0, (w - 3) // 2))
+        inset_y = min(max(1, round(.002 * h)), max(0, (hh - 3) // 2))
+        found[y + inset_y:y + hh - inset_y, x + inset_x:x + w - inset_x] = 1
         boxes.append((x, y, w, hh))
-    if boxes:
-        found = cv2.morphologyEx(found, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
     return found, boxes
 
 
@@ -111,8 +113,8 @@ def _zone_template(template: np.ndarray):
     top, bottom, contrast = _central_hole_band(template)
     hole, boxes = _hole_template(template, top, bottom)
     zones = np.full((h, p), ZONE_CODES['tread'], np.uint8)
-    upper = max(0, top - round(.04 * h))
-    lower = min(h, bottom + round(.04 * h))
+    upper = max(0, top - round(.02 * h))
+    lower = min(h, bottom + round(.02 * h))
     zones[upper:lower] = ZONE_CODES['embedded_core']
     # Pitch-locked dark valleys outside the central band are the groove prior.
     smooth = cv2.GaussianBlur(template, (0, 0), 3.2)
@@ -159,7 +161,17 @@ def _validate_seeds(seeds, image_width, image_height):
 def _apply_seeds(zone_tile, seeds, original_width, original_height, working_width, working_height):
     pitch = zone_tile.shape[1]
     sx, sy = working_width / original_width, working_height / original_height
-    for seed in seeds:
+    seeded_zones = {seed['zone'] for seed in seeds}
+    if 'embedded_core' in seeded_zones:
+        zone_tile[zone_tile == ZONE_CODES['embedded_core']] = ZONE_CODES['tread']
+    if 'sprocket_hole' in seeded_zones:
+        fallback = 'tread' if 'embedded_core' in seeded_zones else 'embedded_core'
+        zone_tile[zone_tile == ZONE_CODES['sprocket_hole']] = ZONE_CODES[fallback]
+    if 'groove' in seeded_zones:
+        zone_tile[zone_tile == ZONE_CODES['groove']] = ZONE_CODES['tread']
+    # Structural priority makes a core polygon and its hole polygon composable.
+    priority = {'tread': 0, 'groove': 1, 'embedded_core': 2, 'sprocket_hole': 3}
+    for seed in sorted(seeds, key=lambda item: priority[item['zone']]):
         points = np.array(seed['polygon'], np.float32)
         points[:, 0] *= sx
         points[:, 1] *= sy
@@ -386,6 +398,11 @@ def analyze_damage(result_dir, zone_seeds=None, config=None):
     folder = result_dir / 'damage'
     folder.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(folder / 'zone_mask.png'), zones)
+    color_overlay = np.zeros((*zones.shape, 4), np.uint8)
+    for code, color in {1: (93, 145, 26), 2: (196, 138, 43), 3: (31, 101, 220), 4: (151, 69, 162)}.items():
+        color_overlay[zones == code, :3] = color
+        color_overlay[zones == code, 3] = 92
+    cv2.imwrite(str(folder / 'zone_overlay.png'), color_overlay)
     if previous:
         for manual in (d for d in previous['candidates'] if d.get('source') == 'manual'):
             manual['zone'], manual['zone_area_mm2'] = _manual_zone_areas(

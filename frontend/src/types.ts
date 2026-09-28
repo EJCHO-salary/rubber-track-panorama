@@ -59,3 +59,50 @@ export interface Sample {
 
 export type JobList = { items: JobSummary[]; total: number }
 export type SampleList = { items: Sample[] }
+
+export type DamageZone = 'tread' | 'groove' | 'sprocket_hole' | 'embedded_core'
+export type DamageMode = 'chunk' | 'tear'
+export type Point = [number, number]
+
+export interface ZoneSeed {
+  zone: DamageZone
+  polygon: Point[]
+}
+
+export interface DamageCandidate {
+  id: string
+  mode: DamageMode
+  zone: DamageZone
+  source: 'auto' | 'manual'
+  included: boolean
+  reviewed: boolean
+  auto_reason: string | null
+  area_mm2: number
+  length_mm: number
+  width_mm: number
+  bbox_xywh: [number, number, number, number]
+  polygon: Point[]
+  zone_area_mm2: Partial<Record<DamageZone, number>>
+}
+
+export interface DamageMetric {
+  visible_area_mm2: number
+  damaged_area_mm2: number
+  damage_percent: number
+  chunk_count: number
+  tear_count: number
+}
+
+export interface DamageAnalysis {
+  version: number
+  created_at: string
+  image_size_wh: [number, number]
+  nominal_pixels_per_mm: number
+  pitch_px: number
+  zone_seeds: ZoneSeed[]
+  zone_detection: { confidence: 'low' | 'medium' | 'high'; hole_components_per_pitch: number; central_band_fraction: [number, number] }
+  candidates: DamageCandidate[]
+  active_modes: DamageMode[]
+  summary: { zones: Record<DamageZone, DamageMetric>; total: DamageMetric; excluded_count: number; pending_review_count: number }
+  review_status: 'unverified_auto_candidates' | 'manually_reviewed'
+}

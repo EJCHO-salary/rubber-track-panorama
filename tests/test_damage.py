@@ -44,6 +44,41 @@ def test_pitch_repeated_zone_seed_and_damage_candidates(tmp_path):
     assert analysis['image_size_wh'] == [image.shape[1], image.shape[0]]
 
 
+def test_auto_hole_is_rectangular_interior_and_core_is_remaining_center_rubber(tmp_path):
+    make_panorama(tmp_path)
+    analyze_damage(tmp_path)
+    mask = cv2.imread(str(tmp_path / 'damage' / 'zone_mask.png'), cv2.IMREAD_GRAYSCALE)
+    assert mask[80, 20] == ZONE_CODES['sprocket_hole']
+    assert mask[80, 13] == ZONE_CODES['embedded_core']
+    assert mask[80, 30] == ZONE_CODES['embedded_core']
+    assert mask[70, 20] == ZONE_CODES['embedded_core']
+    assert mask[90, 20] == ZONE_CODES['tread']
+
+
+def test_manual_hole_replaces_auto_hole_across_pitches(tmp_path):
+    make_panorama(tmp_path)
+    seed = {'zone': 'sprocket_hole', 'polygon': [[125, 185], [145, 185], [145, 213], [125, 213]]}
+    analyze_damage(tmp_path, [seed])
+    mask = cv2.imread(str(tmp_path / 'damage' / 'zone_mask.png'), cv2.IMREAD_GRAYSCALE)
+    assert mask[80, 14] == ZONE_CODES['sprocket_hole']
+    assert mask[80, 54] == ZONE_CODES['sprocket_hole']
+    assert mask[80, 23] != ZONE_CODES['sprocket_hole']
+    assert (tmp_path / 'damage' / 'zone_overlay.png').is_file()
+
+
+def test_core_and_hole_seeds_replace_both_auto_shapes(tmp_path):
+    make_panorama(tmp_path)
+    seeds = [
+        {'zone': 'embedded_core', 'polygon': [[120, 170], [150, 170], [150, 230], [120, 230]]},
+        {'zone': 'sprocket_hole', 'polygon': [[125, 185], [140, 185], [140, 215], [125, 215]]},
+    ]
+    analyze_damage(tmp_path, seeds)
+    mask = cv2.imread(str(tmp_path / 'damage' / 'zone_mask.png'), cv2.IMREAD_GRAYSCALE)
+    assert mask[80, 14] == ZONE_CODES['sprocket_hole']
+    assert mask[80, 19] == ZONE_CODES['embedded_core']
+    assert mask[80, 24] == ZONE_CODES['tread']
+
+
 def test_manual_decision_and_mode_preserved_on_reanalysis(tmp_path):
     make_panorama(tmp_path)
     analysis = analyze_damage(tmp_path)
@@ -86,10 +121,11 @@ def test_damage_api_review_flow(tmp_path, monkeypatch):
         assert response.status_code == 200, response.text
         data = response.json()
         assert data['summary']['total']['damage_percent'] > 0
-        candidate = data['candidates'][0]
+        candidate = next(item for item in data['candidates'] if item['included'])
         response = client.patch(f"/api/jobs/{job_id}/damage/candidates/{candidate['id']}", json={'included': False})
         assert response.status_code == 200
         assert next(c for c in response.json()['candidates'] if c['id'] == candidate['id'])['included'] is False
+        assert response.json()['summary']['total']['damaged_area_mm2'] < data['summary']['total']['damaged_area_mm2']
         assert client.patch(f'/api/jobs/{job_id}/damage/modes', json={'active_modes': ['tear']}).status_code == 200
         assert client.post(f'/api/jobs/{job_id}/damage/candidates', json={
             'mode': 'chunk', 'polygon': [[300, 300], [330, 300], [330, 330], [300, 330]]}).status_code == 200

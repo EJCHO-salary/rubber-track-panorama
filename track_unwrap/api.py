@@ -478,7 +478,7 @@ def create_manual_damage(job_id: str, request: ManualDamage):
 @app.get('/api/jobs/{job_id}/damage/files/{name}')
 def damage_artifact(job_id: str, name: str):
     result_dir = _damage_dir(job_id)
-    if name not in {'zone_mask.png', 'anomaly_mask.png', 'zone_preview.jpg', 'zone_review.jpg', 'candidate_review.jpg'}:
+    if name not in {'zone_mask.png', 'zone_overlay.png', 'anomaly_mask.png', 'zone_preview.jpg', 'zone_review.jpg', 'candidate_review.jpg'}:
         raise HTTPException(404)
     path = result_dir / 'damage' / name
     if not path.is_file():
@@ -498,7 +498,7 @@ def sample_damage(case_name: str):
 
 @app.get('/api/samples/{case_name}/damage/files/{name}')
 def sample_damage_artifact(case_name: str, name: str):
-    if case_name not in SAMPLES or name not in {'zone_mask.png', 'anomaly_mask.png', 'zone_preview.jpg', 'zone_review.jpg', 'candidate_review.jpg'}:
+    if case_name not in SAMPLES or name not in {'zone_mask.png', 'zone_overlay.png', 'anomaly_mask.png', 'zone_preview.jpg', 'zone_review.jpg', 'candidate_review.jpg'}:
         raise HTTPException(404)
     path = ROOT / 'output' / SAMPLES[case_name] / 'damage' / name
     if not path.is_file():
@@ -562,6 +562,7 @@ def frontend_asset(asset_path: str):
 
 @app.get('/new')
 @app.get('/jobs/{job_id}')
+@app.get('/jobs/{job_id}/analysis')
 @app.get('/samples/{case_name}')
 def frontend_route():
     return _front_page()

@@ -22,6 +22,7 @@ export default function ZoneWorkspace() {
   const [newGroup, setNewGroup] = useState(''), [newSection, setNewSection] = useState('')
   const [editing, setEditing] = useState(false), [editId, setEditId] = useState<string | null>(null)
   const [draft, setDraft] = useState<Point[]>([]), [repeat, setRepeat] = useState(true)
+  const [closed, setClosed] = useState<ZoneShape[]>([])
   const [repeatPitches, setRepeatPitches] = useState(1)
   const [history, setHistory] = useState<Point[][]>([]), [selectedVertex, setSelectedVertex] = useState<number | null>(null)
   const [focusShape, setFocusShape] = useState<{ polygon: Point[]; nonce: number } | null>(null)
@@ -31,7 +32,7 @@ export default function ZoneWorkspace() {
   const section = group?.sections.find(item => item.id === sectionId) ?? group?.sections[0]
   const groupShapes = analysis?.shapes.filter(item => item.group_id === group?.id) ?? []
   const metrics = group ? analysis?.group_metrics[group.id] : undefined
-  function cancel() { setEditing(false); setEditId(null); setDraft([]); setHistory([]); setSelectedVertex(null); setAssistNote('') }
+  function cancel() { setEditing(false); setEditId(null); setDraft([]); setClosed([]); setHistory([]); setSelectedVertex(null); setAssistNote('') }
   const save = useMutation({ mutationFn: ({ groups, shapes }: { groups: ZoneGroup[]; shapes: ZoneShape[] }) => api.saveZones(id, groups, shapes),
     onSuccess: (data: ZoneAnalysis) => { queryClient.setQueryData(['zones', id], data); setError(''); cancel() },
     onError: (cause: Error) => setError(cause.message) })
@@ -76,7 +77,7 @@ export default function ZoneWorkspace() {
     if (!group || !section) return
     setEditing(true); setEditId(shape?.id ?? null); setDraft(shape ? copy(shape.polygon) : []); setRepeat(shape?.repeat ?? true)
     setRepeatPitches(shape?.repeat_pitches ?? 1)
-    setHistory([]); setSelectedVertex(null); setAssistNote(''); setError(''); setShowOverlay(true)
+    setClosed([]); setHistory([]); setSelectedVertex(null); setAssistNote(''); setError(''); setShowOverlay(true)
     if (shape) { setSectionId(shape.section_id); setFocusShape({ polygon: shape.polygon, nonce: Date.now() }) }
   }
   function remember() { setHistory(items => [...items.slice(-29), copy(draft)]) }
@@ -85,14 +86,31 @@ export default function ZoneWorkspace() {
   function move(index: number, point: Point) { setDraft(items => items.map((item, i) => i === index ? point : item)) }
   function removePoint(index: number) { remember(); setDraft(items => items.filter((_, i) => i !== index)); setSelectedVertex(null) }
   function undo() { if (history.length) { setDraft(history[history.length-1]); setHistory(items => items.slice(0, -1)); setSelectedVertex(null) } }
-  function saveDraft() {
+  function closeCurrent() {
     if (!analysis || !group || !section || draft.length < 3 || busy) return
     const xs = draft.map(point => point[0])
     if (repeat && Math.max(...xs) - Math.min(...xs) > analysis.pitch_px * repeatPitches * 1.1) {
       setError('형상 너비가 반복 간격보다 큽니다. 반복 피치 수를 늘리거나 반복을 꺼 주세요.'); return
     }
-    const shape: ZoneShape = { id: editId ?? uid(), group_id: group.id, section_id: section.id, polygon: draft, repeat, repeat_pitches: repeatPitches }
-    commit(analysis.groups, editId ? analysis.shapes.map(item => item.id === editId ? shape : item) : [...analysis.shapes, shape])
+    const shape: ZoneShape = { id: editId ?? uid(), group_id: group.id, section_id: section.id, polygon: copy(draft), repeat, repeat_pitches: repeatPitches }
+    setClosed(items => [...items, shape])
+    setDraft([]); setEditId(null); setHistory([]); setSelectedVertex(null)
+    setAssistNote('도형을 닫았습니다. 사진의 다음 위치를 누르면 같은 섹션의 새 도형이 시작됩니다.')
+    setError('')
+  }
+  function reopenClosed(index: number) {
+    if (draft.length) return
+    const shape = closed[index]
+    setClosed(items => items.filter((_, i) => i !== index))
+    setDraft(copy(shape.polygon)); setEditId(shape.id); setRepeat(shape.repeat); setRepeatPitches(shape.repeat_pitches)
+    setHistory([]); setSelectedVertex(null); setAssistNote('첫 점을 눌러 다시 닫으세요.')
+  }
+  function saveClosed() {
+    if (!analysis || !closed.length || draft.length || busy) return
+    const replacements = new Map(closed.map(shape => [shape.id, shape]))
+    const existing = analysis.shapes.map(shape => replacements.get(shape.id) ?? shape)
+    const fresh = closed.filter(shape => !analysis.shapes.some(item => item.id === shape.id))
+    commit(analysis.groups, [...existing, ...fresh])
   }
   useEffect(() => {
     if (!editing) return
@@ -100,7 +118,7 @@ export default function ZoneWorkspace() {
       const target = event.target as HTMLElement
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return
       if ((event.key === 'Delete' || event.key === 'Backspace') && selectedVertex !== null) { event.preventDefault(); removePoint(selectedVertex) }
-      else if (event.key === 'Escape') cancel()
+      else if (event.key === 'Escape') { event.preventDefault(); cancel() }
       else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); undo() }
     }
     window.addEventListener('keydown', key)
@@ -120,15 +138,15 @@ export default function ZoneWorkspace() {
     <div className={styles.warning}><AlertCircle size={18} /><span>형상·손상 자동 판정은 없습니다. 직접 그리거나 경계 보조 선택을 사용하세요. 각 체계의 남는 부분은 지정한 기본 섹션으로 채웁니다.</span></div>
     {error && <div className={styles.error} role="alert"><AlertCircle size={16} />{error}<button onClick={() => setError('')} aria-label="오류 닫기"><X size={15} /></button></div>}
     <div className={styles.groupBar}><div className={styles.barTitle}><span className={styles.eyebrow}>CLASSIFICATION LAYERS</span><strong>분류 체계</strong><small>체계 간 영역은 겹쳐도 됩니다.</small></div>
-      <div className={styles.groupTabs}>{analysis.groups.map(item => <button key={item.id} className={item.id === group?.id ? styles.groupTabActive : styles.groupTab} onClick={() => { cancel(); setGroupId(item.id); setSectionId(item.sections[0].id) }} disabled={busy}>{item.name}</button>)}</div>
-      <form className={styles.inlineAdd} onSubmit={event => { event.preventDefault(); addGroup() }}><input aria-label="새 분류 체계 이름" placeholder="새 분류 체계" value={newGroup} onChange={event => setNewGroup(event.target.value)} maxLength={80} /><button type="submit" disabled={!newGroup.trim() || busy}><Plus size={15} /> 추가</button></form></div>
+      <div className={styles.groupTabs}>{analysis.groups.map(item => <button key={item.id} className={item.id === group?.id ? styles.groupTabActive : styles.groupTab} onClick={() => { cancel(); setGroupId(item.id); setSectionId(item.sections[0].id) }} disabled={busy || editing}>{item.name}</button>)}</div>
+      <form className={styles.inlineAdd} onSubmit={event => { event.preventDefault(); addGroup() }}><input aria-label="새 분류 체계 이름" placeholder="새 분류 체계" value={newGroup} onChange={event => setNewGroup(event.target.value)} maxLength={80} disabled={editing} /><button type="submit" disabled={!newGroup.trim() || busy || editing}><Plus size={15} /> 추가</button></form></div>
     <div className={styles.workspace}>
       <section className={styles.mainPanel}>
         <div className={styles.canvasHeader}><div><span className={styles.eyebrow}>PANORAMA CANVAS</span><h3>{group ? `${group.name} · 전개 사진 위에 그리기` : '전개 사진'}</h3></div>
           <div className={styles.layers} role="group" aria-label="표시 레이어"><button className={!showOverlay ? styles.layerActive : ''} onClick={() => setShowOverlay(false)}><Eye size={15} /> 원본</button><button className={showOverlay ? styles.layerActive : ''} onClick={() => setShowOverlay(true)}><Layers3 size={15} /> 영역</button></div></div>
-        <ZoneCanvas jobId={id} groupId={group?.id ?? null} analysis={analysis} editing={editing} points={draft} selectedVertex={selectedVertex}
+        <ZoneCanvas jobId={id} groupId={group?.id ?? null} analysis={analysis} editing={editing} points={draft} closedShapes={closed} selectedVertex={selectedVertex}
           opacity={showOverlay ? opacity : 0} focusShape={focusShape} onAdd={add} onInsert={insert}
-          onMoveStart={remember} onMove={move} onSelect={setSelectedVertex} onDelete={removePoint} />
+          onMoveStart={remember} onMove={move} onSelect={setSelectedVertex} onDelete={removePoint} onClose={closeCurrent} />
         <div className={styles.canvasFooter}>{group?.sections.map(item => <span key={item.id}><i style={{ background: item.color }} />{item.name}</span>)}
           <label className={styles.opacityControl}>색 농도 <input type="range" min="0" max="100" value={Math.round(opacity*100)} onChange={event => setOpacity(Number(event.target.value)/100)} /></label></div>
         {group && <div className={styles.metricGrid}><div><small>전체 픽셀 채움</small><strong>{metrics?.coverage_percent ?? 100}%</strong><small>남는 영역 → {group.sections.find(item => item.id === group.default_section_id)?.name}</small></div>
@@ -137,27 +155,30 @@ export default function ZoneWorkspace() {
       <aside className={styles.inspector}><div className={styles.inspectorBody}>
         {group ? <>
           <div className={styles.sectionIntro}><span className={styles.eyebrow}>01 / CLASSIFICATION</span><h3>분류 체계와 섹션</h3><p>이름은 제품과 분석 목적에 맞게 바꿀 수 있습니다. 제조공법 구분처럼 겹치는 지도는 새 분류 체계로 추가하세요.</p></div>
-          <div className={styles.editRow}><input key={group.id} aria-label="분류 체계 이름 수정" defaultValue={group.name} maxLength={80} onBlur={event => { if (event.target.value.trim() && event.target.value.trim() !== group.name) updateGroup({ ...group, name: event.target.value.trim() }) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} disabled={busy} />
-            <button aria-label="분류 체계 삭제" title="분류 체계 삭제" onClick={() => removeGroup(group)} disabled={busy}><Trash2 size={15} /></button></div>
-          <label className={styles.fallbackSelect}>빈 영역에 적용할 섹션<select value={group.default_section_id} onChange={event => updateGroup({ ...group, default_section_id: event.target.value })} disabled={busy}>
+          <div className={styles.editRow}><input key={group.id} aria-label="분류 체계 이름 수정" defaultValue={group.name} maxLength={80} onBlur={event => { if (event.target.value.trim() && event.target.value.trim() !== group.name) updateGroup({ ...group, name: event.target.value.trim() }) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} disabled={busy || editing} />
+            <button aria-label="분류 체계 삭제" title="분류 체계 삭제" onClick={() => removeGroup(group)} disabled={busy || editing}><Trash2 size={15} /></button></div>
+          <label className={styles.fallbackSelect}>빈 영역에 적용할 섹션<select value={group.default_section_id} onChange={event => updateGroup({ ...group, default_section_id: event.target.value })} disabled={busy || editing}>
             {group.sections.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
           <div className={styles.sectionList}>{group.sections.map(item => <div key={item.id} className={styles.sectionRow}>
-            <button className={item.id === section?.id ? styles.sectionSelectActive : styles.sectionSelect} onClick={() => { setSectionId(item.id); cancel() }} disabled={busy} title="그릴 섹션 선택"><i style={{ background: item.color }} /><Check size={13} /></button>
-            <input key={`${group.id}-${item.id}`} aria-label={`${item.name} 이름 수정`} defaultValue={item.name} maxLength={80} onBlur={event => { if (event.target.value.trim() && event.target.value.trim() !== item.name) updateGroup({ ...group, sections: group.sections.map(section => section.id === item.id ? { ...section, name: event.target.value.trim() } : section) }) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} disabled={busy} />
-            <input type="color" aria-label={`${item.name} 색상`} value={item.color} onChange={event => updateGroup({ ...group, sections: group.sections.map(section => section.id === item.id ? { ...section, color: event.target.value } : section) })} disabled={busy} />
-            <button aria-label={`${item.name} 삭제`} onClick={() => removeSection(item)} disabled={busy}><Trash2 size={14} /></button></div>)}</div>
-          <form className={styles.inlineAdd} onSubmit={event => { event.preventDefault(); addSection() }}><input aria-label="새 섹션 이름" placeholder="새 세부 섹션" value={newSection} onChange={event => setNewSection(event.target.value)} maxLength={80} /><button type="submit" disabled={!newSection.trim() || busy}><Plus size={15} /> 추가</button></form>
-          <div className={styles.drawBlock}><strong>{editing ? `${editId ? '형상 수정' : '새 형상'} · ${section?.name}` : '형상 그리기'}</strong>
-            <p>{editing ? `${draft.length}개 점 · 점 드래그 이동 · 선 클릭해 점 추가 · 점 우클릭 또는 Delete로 삭제` : '섹션을 선택한 뒤 한 개 이상의 형상을 그리세요. 한 피치에 여러 홈도 지정할 수 있습니다.'}</p>
+            <button className={item.id === section?.id ? styles.sectionSelectActive : styles.sectionSelect} onClick={() => { setSectionId(item.id); cancel() }} disabled={busy || editing} title="그릴 섹션 선택"><i style={{ background: item.color }} /><Check size={13} /></button>
+            <input key={`${group.id}-${item.id}`} aria-label={`${item.name} 이름 수정`} defaultValue={item.name} maxLength={80} onBlur={event => { if (event.target.value.trim() && event.target.value.trim() !== item.name) updateGroup({ ...group, sections: group.sections.map(section => section.id === item.id ? { ...section, name: event.target.value.trim() } : section) }) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} disabled={busy || editing} />
+            <input type="color" aria-label={`${item.name} 색상`} value={item.color} onChange={event => updateGroup({ ...group, sections: group.sections.map(section => section.id === item.id ? { ...section, color: event.target.value } : section) })} disabled={busy || editing} />
+            <button aria-label={`${item.name} 삭제`} onClick={() => removeSection(item)} disabled={busy || editing}><Trash2 size={14} /></button></div>)}</div>
+          <form className={styles.inlineAdd} onSubmit={event => { event.preventDefault(); addSection() }}><input aria-label="새 섹션 이름" placeholder="새 세부 섹션" value={newSection} onChange={event => setNewSection(event.target.value)} maxLength={80} disabled={editing} /><button type="submit" disabled={!newSection.trim() || busy || editing}><Plus size={15} /> 추가</button></form>
+          <div className={styles.drawBlock}><strong>{editing ? `${section?.name} 도형 그리기` : '형상 그리기'}</strong>
+            <p>{editing ? `그리는 점 ${draft.length}개 · 닫힌 도형 ${closed.length}개. 첫 점을 다시 눌러 닫으면 다음 클릭부터 새 도형을 그립니다.` : '사진에서 점을 찍고 첫 점을 다시 눌러 도형을 닫으세요. 다음 클릭은 같은 섹션의 새 도형을 시작합니다.'}</p>
             {editing ? <><div className={styles.repeatSettings}><label className={styles.repeatToggle}><input type="checkbox" checked={repeat} onChange={event => setRepeat(event.target.checked)} /> 피치마다 반복 적용</label>
               {repeat && <label className={styles.repeatInterval}>반복 간격 <input type="number" min="1" max="2000" step="1" value={repeatPitches} onChange={event => setRepeatPitches(Math.max(1, Math.min(2000, Number(event.target.value) || 1)))} /> 피치마다</label>}</div>
               <div className={styles.drawActions}><button onClick={undo} disabled={!history.length || busy}><Undo2 size={15} /> 되돌리기</button><button onClick={() => selectedVertex !== null && removePoint(selectedVertex)} disabled={selectedVertex === null || busy}><Eraser size={15} /> 점 삭제</button><button onClick={cancel} disabled={busy}><X size={15} /> 취소</button></div>
-              <div className={styles.drawActions}><button onClick={() => assist.mutate(draft)} disabled={draft.length < 3 || busy}><Magnet size={15} /> 경계 보조 선택</button><button className={styles.primary} onClick={saveDraft} disabled={draft.length < 3 || busy}>{save.isPending ? '저장 중…' : '형상 저장'} <Check size={15} /></button></div>{assistNote && <p className={styles.toolNote}>{assistNote}</p>}</>
+              <div className={styles.drawActions}><button onClick={() => assist.mutate(draft)} disabled={draft.length < 3 || busy}><Magnet size={15} /> 경계 보조 선택</button><button onClick={closeCurrent} disabled={draft.length < 3 || busy}>현재 도형 닫기 <Check size={15} /></button></div>
+              {closed.length > 0 && <div className={styles.pendingShapes}><strong>닫힌 도형 {closed.length}개</strong>{closed.map((shape, index) => <div key={shape.id}><span>{index + 1} · {shape.repeat ? `${shape.repeat_pitches}피치 반복` : '반복 없음'}</span><button onClick={() => reopenClosed(index)} disabled={!!draft.length || busy}>점 수정</button><button onClick={() => setClosed(items => items.filter((_, i) => i !== index))} disabled={busy}>제외</button></div>)}</div>}
+              <button className={styles.drawStart} onClick={saveClosed} disabled={!closed.length || !!draft.length || busy}>{save.isPending ? '저장 중…' : `닫힌 도형 ${closed.length}개 한 번에 저장`} <Check size={15} /></button>
+              {assistNote && <p className={styles.toolNote}>{assistNote}</p>}</>
               : <button className={styles.drawStart} onClick={() => begin()} disabled={busy}><PenLine size={17} /> {section?.name} 형상 추가 <Plus size={15} /></button>}</div>
           <div className={styles.savedSeeds}><div className={styles.miniHead}><strong>저장된 형상</strong><span>{groupShapes.length}개</span></div>
             {groupShapes.length ? groupShapes.map(shape => { const label = group.sections.find(item => item.id === shape.section_id); return <div className={styles.seedRow} key={shape.id}>
               <i style={{ background: label?.color }} /><span>{label?.name ?? '삭제된 섹션'}<small>{shape.polygon.length}개 점 · {shape.repeat ? `${shape.repeat_pitches ?? 1}피치마다 반복` : '이 위치에만 적용'}</small></span>
-              <button aria-label={`${label?.name} 형상 편집`} onClick={() => begin(shape)} disabled={busy}><PenLine size={15} /></button><button aria-label={`${label?.name} 형상 삭제`} onClick={() => commit(analysis.groups, analysis.shapes.filter(item => item.id !== shape.id))} disabled={busy}><Trash2 size={15} /></button></div> }) : <p>저장된 형상이 없습니다. 먼저 섹션을 선택하고 사진 위에 그려 주세요.</p>}</div>
+              <button aria-label={`${label?.name} 형상 편집`} onClick={() => begin(shape)} disabled={busy || editing}><PenLine size={15} /></button><button aria-label={`${label?.name} 형상 삭제`} onClick={() => commit(analysis.groups, analysis.shapes.filter(item => item.id !== shape.id))} disabled={busy || editing}><Trash2 size={15} /></button></div> }) : <p>저장된 형상이 없습니다. 먼저 섹션을 선택하고 사진 위에 그려 주세요.</p>}</div>
         </> : <div className={styles.sectionIntro}><h3>분류 체계를 추가하세요</h3><p>형상별, 제조공법별 등 원하는 이름으로 만들 수 있습니다.</p></div>}
       </div></aside>
     </div>

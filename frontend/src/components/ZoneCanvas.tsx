@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import OpenSeadragon from 'openseadragon'
 import { Maximize2, Minus, Plus } from 'lucide-react'
-import type { Point, ZoneAnalysis } from '../types'
+import type { Point, ZoneAnalysis, ZoneShape } from '../types'
 import { fileBase, zoneFileBase } from '../api'
 import styles from '../pages/ZoneWorkspace.module.css'
 
@@ -11,6 +11,7 @@ type Props = {
   analysis: ZoneAnalysis
   editing: boolean
   points: Point[]
+  closedShapes: ZoneShape[]
   selectedVertex: number | null
   opacity: number
   focusShape: { polygon: Point[]; nonce: number } | null
@@ -20,13 +21,17 @@ type Props = {
   onMove: (index: number, point: Point) => void
   onSelect: (index: number) => void
   onDelete: (index: number) => void
+  onClose: () => void
 }
 
-export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, selectedVertex, opacity,
-  focusShape, onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete }: Props) {
+export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, closedShapes, selectedVertex, opacity,
+  focusShape, onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete, onClose }: Props) {
   const host = useRef<HTMLDivElement>(null)
+  const overlayRef = useRef<SVGSVGElement>(null)
   const viewer = useRef<OpenSeadragon.Viewer | null>(null)
   const dragging = useRef<number | null>(null)
+  const pointerStart = useRef<Point | null>(null)
+  const moved = useRef(false)
   const [ready, setReady] = useState(false)
   const [failed, setFailed] = useState(false)
   const [size, setSize] = useState({ width: 1, height: 1 })
@@ -64,6 +69,26 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
   }, [jobId])
 
   useEffect(() => { viewer.current?.setMouseNavEnabled(!editing) }, [editing])
+
+  useEffect(() => {
+    const overlay = overlayRef.current
+    if (!editing || !ready || !overlay || !host.current) return
+    const wheelZoom = (event: WheelEvent) => {
+      const instance = viewer.current
+      const element = host.current
+      if (!instance || !element) return
+      event.preventDefault()
+      event.stopPropagation()
+      const bounds = element.getBoundingClientRect()
+      const pointer = new OpenSeadragon.Point(event.clientX - bounds.left, event.clientY - bounds.top)
+      const anchor = instance.viewport.viewerElementToViewportCoordinates(pointer)
+      const factor = Math.max(.65, Math.min(1.5, Math.exp(-event.deltaY * .0012)))
+      instance.viewport.zoomBy(factor, anchor)
+      instance.viewport.applyConstraints()
+    }
+    overlay.addEventListener('wheel', wheelZoom, { passive: false })
+    return () => overlay.removeEventListener('wheel', wheelZoom)
+  }, [editing, ready])
 
   useEffect(() => {
     if (!ready || !viewer.current || !focusShape?.polygon.length) return
@@ -107,7 +132,7 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
   return <div className={styles.canvasShell}>
     <div ref={host} className={styles.deepzoom} aria-label="확대 가능한 트랙 전개 사진" />
     {failed && <div className={styles.canvasFailure}>확대 이미지를 불러오지 못했습니다.</div>}
-    {ready && <svg className={styles.overlay} width={size.width} height={size.height}
+    {ready && <svg ref={overlayRef} className={styles.overlay} width={size.width} height={size.height}
       style={{ pointerEvents: editing ? 'auto' : 'none', cursor: editing ? 'crosshair' : 'default' }}
       onClick={event => { const point = unproject(event); if (editing && point) onAdd(point) }}>
       {groupId && <image href={`${zoneFileBase(jobId, groupId)}/overlay.png?v=${encodeURIComponent(analysis.created_at)}`}
@@ -117,29 +142,37 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
         const a = project([x, 0]), b = project([x, imageHeight])
         return <line key={index} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} className={styles.pitchGuide} />
       })}
+      {closedShapes.map((shape, index) => <g key={shape.id} pointerEvents="none">
+        <polygon points={polygon(shape.polygon)} className={styles.pendingFill} />
+        <text x={project(shape.polygon[0])[0] + 8} y={project(shape.polygon[0])[1] + 17} className={styles.pendingIndex}>{index + 1}</text>
+      </g>)}
       {points.length > 1 && <polyline points={polygon(points)} className={styles.draftLine} />}
-      {points.length >= 3 && <polygon points={polygon(points)} className={styles.draftFill} />}
       {editing && points.length >= 2 && points.map((point, index) => {
         const next = points[(index + 1) % points.length]
-        if (index === points.length-1 && points.length < 3) return null
+        if (index === points.length-1) return null
         const a = project(point), b = project(next)
         return <line key={`edge-${index}`} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]}
           className={styles.insertEdge} onClick={event => { event.stopPropagation(); const at = unproject(event); if (at) onInsert(index+1, at) }} />
       })}
       {editing && points.map((point, index) => {
         const [x, y] = project(point)
-        return <circle key={index} cx={x} cy={y} r={selectedVertex === index ? 7 : 6}
-          className={selectedVertex === index ? styles.selectedPoint : styles.draftPoint}
-          onPointerDown={event => { event.stopPropagation(); dragging.current = index; onMoveStart(index); onSelect(index); event.currentTarget.setPointerCapture(event.pointerId) }}
-          onPointerMove={event => { if (dragging.current !== index) return; const at = unproject(event); if (at) onMove(index, at) }}
+        const closing = index === 0 && points.length >= 3
+        return <circle key={index} cx={x} cy={y} r={closing ? 10 : selectedVertex === index ? 7 : 6}
+          className={closing ? styles.closingPoint : selectedVertex === index ? styles.selectedPoint : styles.draftPoint}
+          onPointerDown={event => { event.stopPropagation(); dragging.current = index; pointerStart.current = [event.clientX, event.clientY]; moved.current = false; onMoveStart(index); onSelect(index); event.currentTarget.setPointerCapture(event.pointerId) }}
+          onPointerMove={event => {
+            if (dragging.current !== index) return
+            if (pointerStart.current && Math.hypot(event.clientX - pointerStart.current[0], event.clientY - pointerStart.current[1]) > 4) moved.current = true
+            if (moved.current) { const at = unproject(event); if (at) onMove(index, at) }
+          }}
           onPointerUp={event => { event.stopPropagation(); dragging.current = null; event.currentTarget.releasePointerCapture(event.pointerId) }}
-          onClick={event => { event.stopPropagation(); onSelect(index) }}
+          onClick={event => { event.stopPropagation(); if (closing && !moved.current) onClose(); else onSelect(index) }}
           onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onDelete(index) }} />
       })}
     </svg>}
     <div className={styles.zoomControls}><button onClick={() => viewer.current?.viewport.zoomBy(1.4)} aria-label="확대"><Plus size={17} /></button>
       <button onClick={() => viewer.current?.viewport.zoomBy(1/1.4)} aria-label="축소"><Minus size={17} /></button>
       <button onClick={() => viewer.current?.viewport.goHome()} aria-label="전체 보기"><Maximize2 size={17} /></button></div>
-    <div className={styles.canvasHint}>{editing ? '점을 드래그해 이동 · 선을 눌러 점 추가 · 점에서 오른쪽 클릭해 삭제' : '휠로 확대 · 드래그로 이동'}</div>
+    <div className={styles.canvasHint}>{editing ? '첫 점 클릭으로 도형 닫기 · 다음 클릭으로 새 도형 · 휠 확대·축소 · 점 드래그' : '휠로 확대 · 드래그로 이동'}</div>
   </div>
 }

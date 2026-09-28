@@ -62,7 +62,7 @@ export type SampleList = { items: Sample[] }
 
 export type Point = [number, number]
 
-export interface ZoneSection { id: string; name: string; color: string }
+export interface ZoneSection { id: string; name: string; color: string; repeat_mode: 'examples' | 'independent' }
 export interface ZoneGroup { id: string; name: string; default_section_id: string; sections: ZoneSection[] }
 export interface ZoneShape {
   id: string
@@ -78,6 +78,8 @@ export interface ZoneAnalysis {
   created_at: string
   image_size_wh: [number, number]
   pitch_px: number
+  pitch_anchors_x?: number[]
+  pitch_anchor_source?: 'image' | 'nominal'
   nominal_pixels_per_mm: number
   working_pixels_per_mm: number
   groups: ZoneGroup[]

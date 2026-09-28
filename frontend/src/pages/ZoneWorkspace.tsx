@@ -32,6 +32,9 @@ export default function ZoneWorkspace() {
   const section = group?.sections.find(item => item.id === sectionId) ?? group?.sections[0]
   const groupShapes = analysis?.shapes.filter(item => item.group_id === group?.id) ?? []
   const metrics = group ? analysis?.group_metrics[group.id] : undefined
+  useEffect(() => {
+    if (!editing) setRepeatPitches(analysis?.shapes.find(shape => shape.group_id === group?.id && shape.section_id === section?.id && shape.repeat)?.repeat_pitches ?? 1)
+  }, [editing, group?.id, section?.id, analysis?.created_at, analysis?.shapes])
   function cancel() { setEditing(false); setEditId(null); setDraft([]); setClosed([]); setHistory([]); setSelectedVertex(null); setAssistNote('') }
   const save = useMutation({ mutationFn: ({ groups, shapes }: { groups: ZoneGroup[]; shapes: ZoneShape[] }) => api.saveZones(id, groups, shapes),
     onSuccess: (data: ZoneAnalysis) => { queryClient.setQueryData(['zones', id], data); setError(''); cancel() },
@@ -49,7 +52,7 @@ export default function ZoneWorkspace() {
     if (!analysis || !newGroup.trim()) return
     const id = uid(), fallback = uid()
     commit([...analysis.groups, { id, name: newGroup.trim(), default_section_id: fallback,
-      sections: [{ id: fallback, name: '미지정', color: '#9ca9a2' }] }])
+      sections: [{ id: fallback, name: '미지정', color: '#9ca9a2', repeat_mode: 'examples' }] }])
     setGroupId(id); setSectionId(fallback); setNewGroup('')
   }
   function removeGroup(item: ZoneGroup) {
@@ -61,7 +64,7 @@ export default function ZoneWorkspace() {
   function addSection() {
     if (!group || !newSection.trim()) return
     const id = uid()
-    updateGroup({ ...group, sections: [...group.sections, { id, name: newSection.trim(), color: palette[group.sections.length % palette.length] }] })
+    updateGroup({ ...group, sections: [...group.sections, { id, name: newSection.trim(), color: palette[group.sections.length % palette.length], repeat_mode: 'examples' }] })
     setSectionId(id); setNewSection('')
   }
   function removeSection(item: ZoneSection) {
@@ -75,21 +78,39 @@ export default function ZoneWorkspace() {
   }
   function begin(shape?: ZoneShape) {
     if (!group || !section) return
-    setEditing(true); setEditId(shape?.id ?? null); setDraft(shape ? copy(shape.polygon) : []); setRepeat(shape?.repeat ?? true)
+    setEditing(true); setEditId(null); setDraft([]); setRepeat(shape?.repeat ?? true)
     setRepeatPitches(shape?.repeat_pitches ?? 1)
-    setClosed([]); setHistory([]); setSelectedVertex(null); setAssistNote(''); setError(''); setShowOverlay(true)
+    setClosed(shape ? [{ ...shape, polygon: copy(shape.polygon) }] : []); setHistory([]); setSelectedVertex(null); setAssistNote(''); setError(''); setShowOverlay(true)
     if (shape) { setSectionId(shape.section_id); setFocusShape({ polygon: shape.polygon, nonce: Date.now() }) }
   }
   function remember() { setHistory(items => [...items.slice(-29), copy(draft)]) }
   function add(point: Point) { remember(); setDraft(items => [...items, point]); setSelectedVertex(draft.length) }
   function insert(index: number, point: Point) { remember(); setDraft(items => [...items.slice(0, index), point, ...items.slice(index)]); setSelectedVertex(index) }
   function move(index: number, point: Point) { setDraft(items => items.map((item, i) => i === index ? point : item)) }
+  function moveClosed(shapeId: string, index: number, point: Point) {
+    setClosed(items => items.map(shape => shape.id === shapeId ? { ...shape, polygon: shape.polygon.map((vertex, i) => i === index ? point : vertex) } : shape))
+  }
+  function deleteClosedPoint(shapeId: string, index: number) {
+    setClosed(items => items.map(shape => shape.id === shapeId && shape.polygon.length > 3
+      ? { ...shape, polygon: shape.polygon.filter((_, i) => i !== index) } : shape))
+  }
+  function changeRepeatPitches(value: number) {
+    const pitches = Math.max(1, Math.min(2000, value || 1))
+    setRepeatPitches(pitches)
+    setClosed(items => items.map(shape => ({ ...shape, repeat_pitches: pitches })))
+  }
+  function changeRepeat(value: boolean) {
+    setRepeat(value)
+    setClosed(items => items.map(shape => ({ ...shape, repeat: value })))
+  }
   function removePoint(index: number) { remember(); setDraft(items => items.filter((_, i) => i !== index)); setSelectedVertex(null) }
   function undo() { if (history.length) { setDraft(history[history.length-1]); setHistory(items => items.slice(0, -1)); setSelectedVertex(null) } }
   function closeCurrent() {
     if (!analysis || !group || !section || draft.length < 3 || busy) return
     const xs = draft.map(point => point[0])
-    if (repeat && Math.max(...xs) - Math.min(...xs) > analysis.pitch_px * repeatPitches * 1.1) {
+    const anchors = analysis.pitch_anchors_x ?? []
+    const widestPitch = Math.max(analysis.pitch_px, ...anchors.slice(1).map((x, i) => x - anchors[i]))
+    if (repeat && Math.max(...xs) - Math.min(...xs) > widestPitch * repeatPitches * 1.1) {
       setError('형상 너비가 반복 간격보다 큽니다. 반복 피치 수를 늘리거나 반복을 꺼 주세요.'); return
     }
     const shape: ZoneShape = { id: editId ?? uid(), group_id: group.id, section_id: section.id, polygon: copy(draft), repeat, repeat_pitches: repeatPitches }
@@ -146,7 +167,8 @@ export default function ZoneWorkspace() {
           <div className={styles.layers} role="group" aria-label="표시 레이어"><button className={!showOverlay ? styles.layerActive : ''} onClick={() => setShowOverlay(false)}><Eye size={15} /> 원본</button><button className={showOverlay ? styles.layerActive : ''} onClick={() => setShowOverlay(true)}><Layers3 size={15} /> 영역</button></div></div>
         <ZoneCanvas jobId={id} groupId={group?.id ?? null} analysis={analysis} editing={editing} points={draft} closedShapes={closed} selectedVertex={selectedVertex}
           opacity={showOverlay ? opacity : 0} focusShape={focusShape} onAdd={add} onInsert={insert}
-          onMoveStart={remember} onMove={move} onSelect={setSelectedVertex} onDelete={removePoint} onClose={closeCurrent} />
+          onMoveStart={remember} onMove={move} onSelect={setSelectedVertex} onDelete={removePoint} onClose={closeCurrent}
+          onClosedMove={moveClosed} onClosedDelete={deleteClosedPoint} />
         <div className={styles.canvasFooter}>{group?.sections.map(item => <span key={item.id}><i style={{ background: item.color }} />{item.name}</span>)}
           <label className={styles.opacityControl}>색 농도 <input type="range" min="0" max="100" value={Math.round(opacity*100)} onChange={event => setOpacity(Number(event.target.value)/100)} /></label></div>
         {group && <div className={styles.metricGrid}><div><small>전체 픽셀 채움</small><strong>{metrics?.coverage_percent ?? 100}%</strong><small>남는 영역 → {group.sections.find(item => item.id === group.default_section_id)?.name}</small></div>
@@ -159,6 +181,10 @@ export default function ZoneWorkspace() {
             <button aria-label="분류 체계 삭제" title="분류 체계 삭제" onClick={() => removeGroup(group)} disabled={busy || editing}><Trash2 size={15} /></button></div>
           <label className={styles.fallbackSelect}>빈 영역에 적용할 섹션<select value={group.default_section_id} onChange={event => updateGroup({ ...group, default_section_id: event.target.value })} disabled={busy || editing}>
             {group.sections.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          {section && <label className={styles.fallbackSelect}>“{section.name}” 반복 방식<select aria-label="반복 방식" value={section.repeat_mode ?? 'examples'}
+            onChange={event => updateGroup({ ...group, sections: group.sections.map(item => item.id === section.id ? { ...item, repeat_mode: event.target.value as ZoneSection['repeat_mode'] } : item) })} disabled={busy || editing}>
+            <option value="examples">여러 도형은 같은 패턴의 예시</option><option value="independent">각 도형을 모두 독립 반복</option></select>
+            <small>예시 모드에서는 구간마다 가장 가까운 예시 도형 하나를 사용하고, 첫 도형의 피치 위상에 맞춥니다. 한 주기에 여러 형상이 필요하면 독립 반복을 선택하세요.</small></label>}
           <div className={styles.sectionList}>{group.sections.map(item => <div key={item.id} className={styles.sectionRow}>
             <button className={item.id === section?.id ? styles.sectionSelectActive : styles.sectionSelect} onClick={() => { setSectionId(item.id); cancel() }} disabled={busy || editing} title="그릴 섹션 선택"><i style={{ background: item.color }} /><Check size={13} /></button>
             <input key={`${group.id}-${item.id}`} aria-label={`${item.name} 이름 수정`} defaultValue={item.name} maxLength={80} onBlur={event => { if (event.target.value.trim() && event.target.value.trim() !== item.name) updateGroup({ ...group, sections: group.sections.map(section => section.id === item.id ? { ...section, name: event.target.value.trim() } : section) }) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} disabled={busy || editing} />
@@ -166,15 +192,20 @@ export default function ZoneWorkspace() {
             <button aria-label={`${item.name} 삭제`} onClick={() => removeSection(item)} disabled={busy || editing}><Trash2 size={14} /></button></div>)}</div>
           <form className={styles.inlineAdd} onSubmit={event => { event.preventDefault(); addSection() }}><input aria-label="새 섹션 이름" placeholder="새 세부 섹션" value={newSection} onChange={event => setNewSection(event.target.value)} maxLength={80} disabled={editing} /><button type="submit" disabled={!newSection.trim() || busy || editing}><Plus size={15} /> 추가</button></form>
           <div className={styles.drawBlock}><strong>{editing ? `${section?.name} 도형 그리기` : '형상 그리기'}</strong>
+            <p>{analysis.pitch_anchor_source === 'image' ? `사진에서 피치 기준점 ${analysis.pitch_anchors_x?.length ?? 0}개를 측정해 반복 위치를 보정합니다.` : '사진에서 피치 기준점을 안정적으로 찾지 못해 입력한 피치의 명목 간격을 사용합니다.'}</p>
             <p>{editing ? `그리는 점 ${draft.length}개 · 닫힌 도형 ${closed.length}개. 첫 점을 다시 눌러 닫으면 다음 클릭부터 새 도형을 그립니다.` : '사진에서 점을 찍고 첫 점을 다시 눌러 도형을 닫으세요. 다음 클릭은 같은 섹션의 새 도형을 시작합니다.'}</p>
-            {editing ? <><div className={styles.repeatSettings}><label className={styles.repeatToggle}><input type="checkbox" checked={repeat} onChange={event => setRepeat(event.target.checked)} /> 피치마다 반복 적용</label>
-              {repeat && <label className={styles.repeatInterval}>반복 간격 <input type="number" min="1" max="2000" step="1" value={repeatPitches} onChange={event => setRepeatPitches(Math.max(1, Math.min(2000, Number(event.target.value) || 1)))} /> 피치마다</label>}</div>
+            {editing ? <><div className={styles.repeatSettings}><label className={styles.repeatToggle}><input type="checkbox" checked={repeat} onChange={event => changeRepeat(event.target.checked)} /> 피치마다 반복 적용</label>
+              {repeat && <label className={styles.repeatInterval}>반복 간격 <input type="number" min="1" max="2000" step="1" value={repeatPitches} onChange={event => changeRepeatPitches(Number(event.target.value))} /> 피치마다</label>}</div>
               <div className={styles.drawActions}><button onClick={undo} disabled={!history.length || busy}><Undo2 size={15} /> 되돌리기</button><button onClick={() => selectedVertex !== null && removePoint(selectedVertex)} disabled={selectedVertex === null || busy}><Eraser size={15} /> 점 삭제</button><button onClick={cancel} disabled={busy}><X size={15} /> 취소</button></div>
               <div className={styles.drawActions}><button onClick={() => assist.mutate(draft)} disabled={draft.length < 3 || busy}><Magnet size={15} /> 경계 보조 선택</button><button onClick={closeCurrent} disabled={draft.length < 3 || busy}>현재 도형 닫기 <Check size={15} /></button></div>
-              {closed.length > 0 && <div className={styles.pendingShapes}><strong>닫힌 도형 {closed.length}개</strong>{closed.map((shape, index) => <div key={shape.id}><span>{index + 1} · {shape.repeat ? `${shape.repeat_pitches}피치 반복` : '반복 없음'}</span><button onClick={() => reopenClosed(index)} disabled={!!draft.length || busy}>점 수정</button><button onClick={() => setClosed(items => items.filter((_, i) => i !== index))} disabled={busy}>제외</button></div>)}</div>}
+              {closed.length > 0 && <div className={styles.pendingShapes}><strong>닫힌 도형 {closed.length}개 · 사진 위 점을 끌어 수정</strong>{closed.map((shape, index) => <div key={shape.id}><span>{index + 1} · {shape.repeat ? `${shape.repeat_pitches}피치 반복` : '반복 없음'}</span><button onClick={() => reopenClosed(index)} disabled={!!draft.length || busy}>점 추가</button><button onClick={() => setClosed(items => items.filter((_, i) => i !== index))} disabled={busy}>제외</button></div>)}</div>}
               <button className={styles.drawStart} onClick={saveClosed} disabled={!closed.length || !!draft.length || busy}>{save.isPending ? '저장 중…' : `닫힌 도형 ${closed.length}개 한 번에 저장`} <Check size={15} /></button>
               {assistNote && <p className={styles.toolNote}>{assistNote}</p>}</>
               : <button className={styles.drawStart} onClick={() => begin()} disabled={busy}><PenLine size={17} /> {section?.name} 형상 추가 <Plus size={15} /></button>}</div>
+          {!editing && section && groupShapes.some(shape => shape.section_id === section.id && shape.repeat) &&
+            <div className={styles.bulkRepeat}><strong>{section.name} 저장된 도형 반복 간격</strong><p>이 섹션의 반복 도형 모두에 같은 간격을 적용합니다.</p>
+              <input aria-label="저장된 도형 반복 간격" type="number" min="1" max="2000" value={repeatPitches} onChange={event => setRepeatPitches(Math.max(1, Math.min(2000, Number(event.target.value) || 1)))} /> 피치마다
+              <button disabled={busy} onClick={() => commit(analysis.groups, analysis.shapes.map(shape => shape.group_id === group.id && shape.section_id === section.id && shape.repeat ? { ...shape, repeat_pitches: repeatPitches } : shape))}>모든 저장 도형에 적용</button></div>}
           <div className={styles.savedSeeds}><div className={styles.miniHead}><strong>저장된 형상</strong><span>{groupShapes.length}개</span></div>
             {groupShapes.length ? groupShapes.map(shape => { const label = group.sections.find(item => item.id === shape.section_id); return <div className={styles.seedRow} key={shape.id}>
               <i style={{ background: label?.color }} /><span>{label?.name ?? '삭제된 섹션'}<small>{shape.polygon.length}개 점 · {shape.repeat ? `${shape.repeat_pitches ?? 1}피치마다 반복` : '이 위치에만 적용'}</small></span>

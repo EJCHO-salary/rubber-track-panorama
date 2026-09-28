@@ -57,18 +57,41 @@ def test_independent_layers_repeat_and_one_off(tmp_path):
 
 def test_two_pitch_phase_and_multiple_shapes_in_one_section(tmp_path):
     make_panorama(tmp_path)
+    taxonomy = groups()[:1]
+    taxonomy[0]['sections'][1]['repeat_mode'] = 'independent'
     shapes = [
         {'id': 'first', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': True,
          'repeat_pitches': 2, 'polygon': [[4, 15], [10, 15], [10, 55], [4, 55]]},
         {'id': 'second', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': True,
          'repeat_pitches': 2, 'polygon': [[61, 15], [67, 15], [67, 55], [61, 55]]},
     ]
-    result = build_zones(tmp_path, groups()[:1], shapes)
+    result = build_zones(tmp_path, taxonomy, shapes)
     mask = cv2.imread(str(tmp_path / 'zones' / 'group_geometry_mask.png'), 0)
     assert mask[30, 7] == mask[30, 107] == mask[30, 307] == 2
     assert mask[30, 64] == mask[30, 164] == mask[30, 364] == 2
     assert mask[30, 57] == mask[30, 157] == 1
     assert [shape['repeat_pitches'] for shape in result['shapes']] == [2, 2]
+
+
+def test_two_pitch_examples_do_not_double_density_even_if_seeds_share_cycle(tmp_path):
+    make_panorama(tmp_path)
+    shapes = [
+        {'id': 'example_a', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': True,
+         'repeat_pitches': 2, 'polygon': [[4, 15], [10, 15], [10, 55], [4, 55]]},
+        {'id': 'example_b', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': True,
+         'repeat_pitches': 2, 'polygon': [[111, 15], [117, 15], [117, 55], [111, 55]]},
+    ]
+    result = build_zones(tmp_path, groups()[:1], shapes)
+    mask = cv2.imread(str(tmp_path / 'zones' / 'group_geometry_mask.png'), 0)
+    assert result['groups'][0]['sections'][1]['repeat_mode'] == 'examples'
+    assert [mask[30, x] for x in (7, 57, 107, 114, 164, 207, 214, 307)] == [2, 1, 2, 1, 1, 2, 1, 2]
+
+    # Even two examples drawn inside the same period stay alternatives.
+    shapes[1]['polygon'] = [[61, 15], [67, 15], [67, 55], [61, 55]]
+    build_zones(tmp_path, groups()[:1], shapes)
+    mask = cv2.imread(str(tmp_path / 'zones' / 'group_geometry_mask.png'), 0)
+    assert mask[30, 7] == mask[30, 107] == mask[30, 207] == 2
+    assert mask[30, 64] == mask[30, 164] == 1
 
 
 def test_taxonomy_can_be_renamed_and_deleted_and_bad_refs_rejected(tmp_path):
@@ -83,6 +106,23 @@ def test_taxonomy_can_be_renamed_and_deleted_and_bad_refs_rejected(tmp_path):
         build_zones(tmp_path, [edited[1]], [{'group_id': 'geometry', 'section_id': 'groove',
                                               'polygon': [[1, 1], [5, 1], [5, 5]], 'repeat': False}])
     assert build_zones(tmp_path, [], [])['groups'] == []
+
+
+def test_repetition_tracks_measured_nonuniform_pitch_positions(tmp_path):
+    make_panorama(tmp_path)
+    image = np.full((200, 400, 3), 140, np.uint8)
+    centers = [25, 75, 129, 185, 242, 300, 361]
+    for x in centers:
+        cv2.rectangle(image, (x-10, 72), (x+10, 128), (30, 30, 30), -1)
+    cv2.imwrite(str(tmp_path / 'panorama.png'), image)
+    shape = {'id': 'groove', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': True,
+             'repeat_pitches': 1, 'polygon': [[22, 15], [28, 15], [28, 55], [22, 55]]}
+    result = build_zones(tmp_path, groups()[:1], [shape])
+    mask = cv2.imread(str(tmp_path / 'zones' / 'group_geometry_mask.png'), 0)
+    assert result['pitch_anchor_source'] == 'image'
+    assert np.allclose(result['pitch_anchors_x'], centers, atol=2)
+    assert all(mask[30, x] == 2 for x in centers)
+    assert mask[30, 325] == 1  # A constant 50 px translation would drift here.
 
 
 def test_repeat_width_guard_and_edge_assist_does_not_save(tmp_path):

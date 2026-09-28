@@ -11,6 +11,8 @@ from uuid import uuid4
 
 import cv2
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import find_peaks
 
 
 ID = re.compile(r'^[a-zA-Z0-9_-]{1,40}$')
@@ -74,7 +76,7 @@ def _metadata(result_dir):
     return image, (width, height), pitch_px, nominal_ppm
 
 
-def _validate(groups, shapes, width, height, pitch_px):
+def _validate(groups, shapes, width, height, pitch_px, max_pitch_px=None):
     if not isinstance(groups, list) or len(groups) > 16:
         raise ValueError('분류 체계는 최대 16개입니다.')
     if not isinstance(shapes, list) or len(shapes) > 512:
@@ -97,7 +99,11 @@ def _validate(groups, shapes, width, height, pitch_px):
             color = section.get('color')
             if not 1 <= len(label) <= 80 or not isinstance(color, str) or not COLOR.fullmatch(color):
                 raise ValueError('세부 섹션 이름과 색상을 확인하세요.')
-            clean_sections.append({'id': section['id'], 'name': label, 'color': color.lower()})
+            repeat_mode = section.get('repeat_mode', 'examples')
+            if repeat_mode not in ('examples', 'independent'):
+                raise ValueError('반복 방식이 올바르지 않습니다.')
+            clean_sections.append({'id': section['id'], 'name': label, 'color': color.lower(),
+                                   'repeat_mode': repeat_mode})
         default = group.get('default_section_id')
         if default not in seen:
             raise ValueError('빈 영역을 채울 기본 섹션을 선택하세요.')
@@ -132,34 +138,82 @@ def _validate(groups, shapes, width, height, pitch_px):
             raise ValueError('피치 반복 설정이 올바르지 않습니다.')
         if isinstance(repeat_pitches, bool) or not isinstance(repeat_pitches, int) or not 1 <= repeat_pitches <= 2000:
             raise ValueError('반복 간격은 1~2000피치의 정수로 입력하세요.')
-        if repeat and np.ptp(coords[:, 0]) > pitch_px * repeat_pitches * 1.1:
+        if repeat and np.ptp(coords[:, 0]) > (max_pitch_px or pitch_px) * repeat_pitches * 1.1:
             raise ValueError('반복 형상은 설정한 반복 간격 안에서 그려 주세요.')
         clean_shapes.append({'id': shape_id, 'group_id': group_id, 'section_id': section_id,
                              'polygon': polygon, 'repeat': repeat, 'repeat_pitches': repeat_pitches})
     return clean_groups, clean_shapes
 
 
-def _draw(mask, polygon, code, repeat, period_px, original_size):
+def _pitch_anchors(image, original_size, pitch_px):
+    """Locate the recurring dark center openings in panorama coordinates."""
+    width, height = original_size
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+    working_pitch = pitch_px * w / width
+    if working_pitch < 16 or w / working_pitch < 3:
+        return np.arange(-pitch_px, width + 2*pitch_px, pitch_px), 'nominal'
+    signal = gray[round(h*.44):round(h*.54)].mean(axis=0)
+    signal = gaussian_filter1d(signal, sigma=max(2, working_pitch*.05))
+    contrast = np.percentile(signal, 90) - np.percentile(signal, 10)
+    peaks, _ = find_peaks(-signal, distance=max(3, round(working_pitch*.66)),
+                          prominence=max(5, contrast*.15))
+    if (len(peaks) < 3 or abs(len(peaks) - w/working_pitch) > max(3, w/working_pitch*.2)
+            or np.any(np.diff(peaks) < working_pitch*.6)
+            or np.any(np.diff(peaks) > working_pitch*1.5)):
+        return np.arange(-pitch_px, width + 2*pitch_px, pitch_px), 'nominal'
+    return peaks.astype(float) * width / w, 'image'
+
+
+def _to_pitch(x, anchors):
+    x = np.asarray(x, dtype=float)
+    indices = np.arange(len(anchors), dtype=float)
+    values = np.interp(x, anchors, indices)
+    return np.where(x < anchors[0], (x-anchors[0])/(anchors[1]-anchors[0]),
+                    np.where(x > anchors[-1], len(anchors)-1+(x-anchors[-1])/(anchors[-1]-anchors[-2]), values))
+
+
+def _from_pitch(pitch, anchors):
+    pitch = np.asarray(pitch, dtype=float)
+    indices = np.arange(len(anchors), dtype=float)
+    values = np.interp(pitch, indices, anchors)
+    return np.where(pitch < 0, anchors[0]+pitch*(anchors[1]-anchors[0]),
+                    np.where(pitch > len(anchors)-1, anchors[-1]+(pitch-len(anchors)+1)*(anchors[-1]-anchors[-2]), values))
+
+
+def _draw(mask, polygon, code, repeat, period_pitches, anchors, original_size, placements=None, phase_pitch=None):
     width, height = original_size
     sx, sy = mask.shape[1] / width, mask.shape[0] / height
     pts = np.asarray(polygon, dtype=np.float64)
-    if repeat:
-        # Keep the shape's phase within its full repetition period. A seed on
-        # odd pitch of a two-pitch pattern must stay on odd pitches.
-        base = pts.copy()
-        base[:, 0] -= np.floor(base[:, 0].min() / period_px) * period_px
-        placements = range(-1, int(np.ceil(width / period_px)) + 2)
-    else:
-        base, placements = pts, [0]
+    source = int(np.floor(_to_pitch(pts[:, 0].min(), anchors) / period_pitches)) if repeat else 0
+    if placements is None:
+        placements = (range(int(np.floor(_to_pitch(0, anchors)/period_pitches))-1,
+                            int(np.ceil(_to_pitch(width, anchors)/period_pitches))+2) if repeat else [0])
     for index in placements:
-        shifted = base.copy()
+        shifted = pts.copy()
         if repeat:
-            shifted[:, 0] += index * period_px
+            source_pitch = _to_pitch(pts[:, 0].min(), anchors)
+            target_pitch = (source_pitch + (index-source)*period_pitches if phase_pitch is None
+                            else phase_pitch + index*period_pitches)
+            shifted[:, 0] = _from_pitch(_to_pitch(pts[:, 0], anchors) - source_pitch + target_pitch, anchors)
         if shifted[:, 0].max() < 0 or shifted[:, 0].min() > width:
             continue
         shifted[:, 0] *= sx
         shifted[:, 1] *= sy
         cv2.fillPoly(mask, [np.rint(shifted).astype(np.int32)], int(code))
+
+
+def _exemplar_placements(shapes, period_pitches, anchors, width):
+    """Choose one authored polygon for each target period, even if seeds share a period."""
+    if not shapes:
+        return {}, 0.
+    reference = _to_pitch(min(point[0] for point in shapes[0]['polygon']), anchors)
+    phase = float(reference % period_pitches)
+    return {target: min(shapes, key=lambda shape: (
+                abs((target*period_pitches + phase) - _to_pitch(min(point[0] for point in shape['polygon']), anchors)),
+                shape['id']))['id']
+            for target in range(int(np.floor(_to_pitch(0, anchors)/period_pitches))-1,
+                                int(np.ceil(_to_pitch(width, anchors)/period_pitches))+2)}, phase
 
 
 def load_zones(result_dir):
@@ -171,6 +225,9 @@ def load_zones(result_dir):
         return None
     for shape in data.get('shapes', []):
         shape.setdefault('repeat_pitches', 1)
+    for group in data.get('groups', []):
+        for section in group.get('sections', []):
+            section.setdefault('repeat_mode', 'examples')
     return data
 
 
@@ -182,7 +239,8 @@ def build_zones(result_dir, groups=None, shapes=None):
         groups = _preset()
     if shapes is None:
         shapes = _legacy_manual_shapes(result_dir, pitch_px) if initializing and load_zones(result_dir) is None else []
-    groups, shapes = _validate(groups, shapes, *size, pitch_px)
+    anchors, anchor_source = _pitch_anchors(image, size, pitch_px)
+    groups, shapes = _validate(groups, shapes, *size, pitch_px, float(np.max(np.diff(anchors))))
     folder = Path(result_dir) / 'zones'
     folder.mkdir(parents=True, exist_ok=True)
     h, w = image.shape[:2]
@@ -192,10 +250,27 @@ def build_zones(result_dir, groups=None, shapes=None):
         codes = {item['id']: index + 1 for index, item in enumerate(sections)}
         default = group['default_section_id']
         mask = np.full((h, w), codes[default], np.uint8)
+        modes = {section['id']: section['repeat_mode'] for section in sections}
+        exemplar_maps = {}
+        for section in sections:
+            if section['repeat_mode'] != 'examples':
+                continue
+            for pitches in {shape['repeat_pitches'] for shape in shapes
+                            if shape['group_id'] == group['id'] and shape['section_id'] == section['id'] and shape['repeat']}:
+                peers = [shape for shape in shapes if shape['group_id'] == group['id']
+                         and shape['section_id'] == section['id'] and shape['repeat'] and shape['repeat_pitches'] == pitches]
+                exemplar_maps[(section['id'], pitches)] = _exemplar_placements(peers, pitches, anchors, size[0])
         for shape in shapes:
             if shape['group_id'] == group['id']:
-                _draw(mask, shape['polygon'], codes[shape['section_id']], shape['repeat'],
-                      pitch_px * shape['repeat_pitches'], size)
+                if shape['repeat'] and modes[shape['section_id']] == 'examples':
+                    placements, phase = exemplar_maps[(shape['section_id'], shape['repeat_pitches'])]
+                    for target, chosen in placements.items():
+                        if chosen == shape['id']:
+                            _draw(mask, shape['polygon'], codes[shape['section_id']], True,
+                                  shape['repeat_pitches'], anchors, size, [target], phase)
+                else:
+                    _draw(mask, shape['polygon'], codes[shape['section_id']], shape['repeat'],
+                          shape['repeat_pitches'], anchors, size)
         overlay = np.zeros((h, w, 4), np.uint8)
         areas = {}
         mm2_per_pixel = (size[0] / w) * (size[1] / h) / (ppm * ppm)
@@ -215,6 +290,7 @@ def build_zones(result_dir, groups=None, shapes=None):
             path.unlink()
     data = {'version': 3, 'created_at': datetime.now(timezone.utc).isoformat(),
             'image_size_wh': list(size), 'pitch_px': pitch_px,
+            'pitch_anchors_x': [round(float(x), 2) for x in anchors], 'pitch_anchor_source': anchor_source,
             'nominal_pixels_per_mm': ppm, 'working_pixels_per_mm': ppm * w / size[0],
             'groups': groups, 'shapes': shapes, 'group_metrics': metrics}
     temporary = folder / 'analysis.json.tmp'

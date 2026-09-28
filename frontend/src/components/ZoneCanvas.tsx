@@ -22,14 +22,17 @@ type Props = {
   onSelect: (index: number) => void
   onDelete: (index: number) => void
   onClose: () => void
+  onClosedMove: (shapeId: string, index: number, point: Point) => void
+  onClosedDelete: (shapeId: string, index: number) => void
 }
 
 export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, closedShapes, selectedVertex, opacity,
-  focusShape, onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete, onClose }: Props) {
+  focusShape, onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete, onClose, onClosedMove, onClosedDelete }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<SVGSVGElement>(null)
   const viewer = useRef<OpenSeadragon.Viewer | null>(null)
   const dragging = useRef<number | null>(null)
+  const draggingClosed = useRef<string | null>(null)
   const pointerStart = useRef<Point | null>(null)
   const moved = useRef(false)
   const [ready, setReady] = useState(false)
@@ -123,8 +126,9 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
   const polygon = (items: Point[]) => items.map(point => project(point).join(',')).join(' ')
   const [imageWidth, imageHeight] = analysis.image_size_wh
   const left = project([0, 0]), right = project([imageWidth, imageHeight])
-  const grid = editing ? Array.from({ length: Math.min(201, Math.ceil(imageWidth / analysis.pitch_px) + 1) },
-    (_, index) => index * analysis.pitch_px).filter(x => {
+  const gridPositions = analysis.pitch_anchors_x?.length ? analysis.pitch_anchors_x
+    : Array.from({ length: Math.min(201, Math.ceil(imageWidth / analysis.pitch_px) + 1) }, (_, index) => index * analysis.pitch_px)
+  const grid = editing ? gridPositions.filter(x => {
       const screen = project([x, 0])[0]
       return screen >= -30 && screen <= size.width + 30
     }) : []
@@ -142,9 +146,19 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
         const a = project([x, 0]), b = project([x, imageHeight])
         return <line key={index} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} className={styles.pitchGuide} />
       })}
-      {closedShapes.map((shape, index) => <g key={shape.id} pointerEvents="none">
+      {closedShapes.map((shape, index) => <g key={shape.id}>
         <polygon points={polygon(shape.polygon)} className={styles.pendingFill} />
         <text x={project(shape.polygon[0])[0] + 8} y={project(shape.polygon[0])[1] + 17} className={styles.pendingIndex}>{index + 1}</text>
+        {editing && shape.polygon.map((point, vertex) => {
+          const [x, y] = project(point), key = `${shape.id}:${vertex}`
+          return <circle key={key} cx={x} cy={y} r={7} className={styles.closedPoint}
+            onPointerDown={event => { event.stopPropagation(); draggingClosed.current = key; event.currentTarget.setPointerCapture(event.pointerId) }}
+            onPointerMove={event => { if (draggingClosed.current !== key) return; const at = unproject(event); if (at) onClosedMove(shape.id, vertex, at) }}
+            onPointerUp={event => { event.stopPropagation(); draggingClosed.current = null; event.currentTarget.releasePointerCapture(event.pointerId) }}
+            onPointerCancel={() => { draggingClosed.current = null }}
+            onClick={event => event.stopPropagation()}
+            onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onClosedDelete(shape.id, vertex) }} />
+        })}
       </g>)}
       {points.length > 1 && <polyline points={polygon(points)} className={styles.draftLine} />}
       {editing && points.length >= 2 && points.map((point, index) => {
@@ -173,6 +187,6 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     <div className={styles.zoomControls}><button onClick={() => viewer.current?.viewport.zoomBy(1.4)} aria-label="확대"><Plus size={17} /></button>
       <button onClick={() => viewer.current?.viewport.zoomBy(1/1.4)} aria-label="축소"><Minus size={17} /></button>
       <button onClick={() => viewer.current?.viewport.goHome()} aria-label="전체 보기"><Maximize2 size={17} /></button></div>
-    <div className={styles.canvasHint}>{editing ? '첫 점 클릭으로 도형 닫기 · 다음 클릭으로 새 도형 · 휠 확대·축소 · 점 드래그' : '휠로 확대 · 드래그로 이동'}</div>
+    <div className={styles.canvasHint}>{editing ? '첫 점 클릭으로 도형 닫기 · 다음 클릭으로 새 도형 · 휠 확대·축소 · 닫힌 도형도 점 드래그' : '휠로 확대 · 드래그로 이동'}</div>
   </div>
 }

@@ -52,7 +52,7 @@ export default function ZoneWorkspace() {
     if (!analysis || !newGroup.trim()) return
     const id = uid(), fallback = uid()
     commit([...analysis.groups, { id, name: newGroup.trim(), default_section_id: fallback,
-      sections: [{ id: fallback, name: '미지정', color: '#9ca9a2', repeat_mode: 'examples' }] }])
+      sections: [{ id: fallback, name: '미지정', color: '#9ca9a2', repeat_mode: 'independent' }] }])
     setGroupId(id); setSectionId(fallback); setNewGroup('')
   }
   function removeGroup(item: ZoneGroup) {
@@ -64,7 +64,7 @@ export default function ZoneWorkspace() {
   function addSection() {
     if (!group || !newSection.trim()) return
     const id = uid()
-    updateGroup({ ...group, sections: [...group.sections, { id, name: newSection.trim(), color: palette[group.sections.length % palette.length], repeat_mode: 'examples' }] })
+    updateGroup({ ...group, sections: [...group.sections, { id, name: newSection.trim(), color: palette[group.sections.length % palette.length], repeat_mode: 'independent' }] })
     setSectionId(id); setNewSection('')
   }
   function removeSection(item: ZoneSection) {
@@ -181,10 +181,10 @@ export default function ZoneWorkspace() {
             <button aria-label="분류 체계 삭제" title="분류 체계 삭제" onClick={() => removeGroup(group)} disabled={busy || editing}><Trash2 size={15} /></button></div>
           <label className={styles.fallbackSelect}>빈 영역에 적용할 섹션<select value={group.default_section_id} onChange={event => updateGroup({ ...group, default_section_id: event.target.value })} disabled={busy || editing}>
             {group.sections.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-          {section && <label className={styles.fallbackSelect}>“{section.name}” 반복 방식<select aria-label="반복 방식" value={section.repeat_mode ?? 'examples'}
+          {section && <label className={styles.fallbackSelect}>“{section.name}” 반복 방식<select aria-label="반복 방식" value={section.repeat_mode ?? 'independent'}
             onChange={event => updateGroup({ ...group, sections: group.sections.map(item => item.id === section.id ? { ...item, repeat_mode: event.target.value as ZoneSection['repeat_mode'] } : item) })} disabled={busy || editing}>
-            <option value="examples">여러 도형은 같은 패턴의 예시</option><option value="independent">각 도형을 모두 독립 반복</option></select>
-            <small>예시 모드에서는 구간마다 가장 가까운 예시 도형 하나를 사용하고, 첫 도형의 피치 위상에 맞춥니다. 한 주기에 여러 형상이 필요하면 독립 반복을 선택하세요.</small></label>}
+            <option value="independent">각 도형을 지정한 간격으로 반복</option><option value="examples">여러 도형 중 한 예시만 선택</option></select>
+            <small>긴 골부와 짧은 골부처럼 모두 보여야 할 형상은 각각 반복합니다. 대체 예시를 그린 경우에만 한 예시 선택을 사용하세요.</small></label>}
           <div className={styles.sectionList}>{group.sections.map(item => <div key={item.id} className={styles.sectionRow}>
             <button className={item.id === section?.id ? styles.sectionSelectActive : styles.sectionSelect} onClick={() => { setSectionId(item.id); cancel() }} disabled={busy || editing} title="그릴 섹션 선택"><i style={{ background: item.color }} /><Check size={13} /></button>
             <input key={`${group.id}-${item.id}`} aria-label={`${item.name} 이름 수정`} defaultValue={item.name} maxLength={80} onBlur={event => { if (event.target.value.trim() && event.target.value.trim() !== item.name) updateGroup({ ...group, sections: group.sections.map(section => section.id === item.id ? { ...section, name: event.target.value.trim() } : section) }) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} disabled={busy || editing} />

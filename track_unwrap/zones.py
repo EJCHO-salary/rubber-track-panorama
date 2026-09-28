@@ -21,11 +21,11 @@ COLOR = re.compile(r'^#[0-9a-fA-F]{6}$')
 
 def _preset():
     sections = [
-        {'id': 'unassigned', 'name': '미지정', 'color': '#9ca9a2'},
-        {'id': 'tread', 'name': '트레드', 'color': '#6f9e62'},
-        {'id': 'groove', 'name': '골부', 'color': '#d2a44d'},
-        {'id': 'embedded_core', 'name': '심금 매설 중앙부', 'color': '#a67db0'},
-        {'id': 'sprocket_hole', 'name': '스프라켓 홀', 'color': '#dc7855'},
+        {'id': 'unassigned', 'name': '미지정', 'color': '#9ca9a2', 'repeat_mode': 'independent'},
+        {'id': 'tread', 'name': '트레드', 'color': '#6f9e62', 'repeat_mode': 'independent'},
+        {'id': 'groove', 'name': '골부', 'color': '#d2a44d', 'repeat_mode': 'independent'},
+        {'id': 'embedded_core', 'name': '심금 매설 중앙부', 'color': '#a67db0', 'repeat_mode': 'independent'},
+        {'id': 'sprocket_hole', 'name': '스프라켓 홀', 'color': '#dc7855', 'repeat_mode': 'independent'},
     ]
     return [{'id': 'geometry', 'name': '형상별 구분', 'default_section_id': 'unassigned', 'sections': sections}]
 
@@ -99,7 +99,7 @@ def _validate(groups, shapes, width, height, pitch_px, max_pitch_px=None):
             color = section.get('color')
             if not 1 <= len(label) <= 80 or not isinstance(color, str) or not COLOR.fullmatch(color):
                 raise ValueError('세부 섹션 이름과 색상을 확인하세요.')
-            repeat_mode = section.get('repeat_mode', 'examples')
+            repeat_mode = section.get('repeat_mode', 'independent')
             if repeat_mode not in ('examples', 'independent'):
                 raise ValueError('반복 방식이 올바르지 않습니다.')
             clean_sections.append({'id': section['id'], 'name': label, 'color': color.lower(),
@@ -227,7 +227,7 @@ def load_zones(result_dir):
         shape.setdefault('repeat_pitches', 1)
     for group in data.get('groups', []):
         for section in group.get('sections', []):
-            section.setdefault('repeat_mode', 'examples')
+            section.setdefault('repeat_mode', 'independent')
     return data
 
 

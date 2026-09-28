@@ -75,23 +75,41 @@ def test_two_pitch_phase_and_multiple_shapes_in_one_section(tmp_path):
 
 def test_two_pitch_examples_do_not_double_density_even_if_seeds_share_cycle(tmp_path):
     make_panorama(tmp_path)
+    taxonomy = groups()[:1]
+    taxonomy[0]['sections'][1]['repeat_mode'] = 'examples'
     shapes = [
         {'id': 'example_a', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': True,
          'repeat_pitches': 2, 'polygon': [[4, 15], [10, 15], [10, 55], [4, 55]]},
         {'id': 'example_b', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': True,
          'repeat_pitches': 2, 'polygon': [[111, 15], [117, 15], [117, 55], [111, 55]]},
     ]
-    result = build_zones(tmp_path, groups()[:1], shapes)
+    result = build_zones(tmp_path, taxonomy, shapes)
     mask = cv2.imread(str(tmp_path / 'zones' / 'group_geometry_mask.png'), 0)
     assert result['groups'][0]['sections'][1]['repeat_mode'] == 'examples'
     assert [mask[30, x] for x in (7, 57, 107, 114, 164, 207, 214, 307)] == [2, 1, 2, 1, 1, 2, 1, 2]
 
     # Even two examples drawn inside the same period stay alternatives.
     shapes[1]['polygon'] = [[61, 15], [67, 15], [67, 55], [61, 55]]
-    build_zones(tmp_path, groups()[:1], shapes)
+    build_zones(tmp_path, taxonomy, shapes)
     mask = cv2.imread(str(tmp_path / 'zones' / 'group_geometry_mask.png'), 0)
     assert mask[30, 7] == mask[30, 107] == mask[30, 207] == 2
     assert mask[30, 64] == mask[30, 164] == 1
+
+
+def test_distinct_long_and_short_grooves_both_repeat_every_two_pitches(tmp_path):
+    make_panorama(tmp_path)
+    shapes = [
+        {'id': 'long', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': True,
+         'repeat_pitches': 2, 'polygon': [[4, 10], [10, 10], [10, 150], [4, 150]]},
+        {'id': 'short', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': True,
+         'repeat_pitches': 2, 'polygon': [[54, 10], [60, 10], [60, 70], [54, 70]]},
+    ]
+    result = build_zones(tmp_path, groups()[:1], shapes)
+    mask = cv2.imread(str(tmp_path / 'zones' / 'group_geometry_mask.png'), 0)
+    assert result['groups'][0]['sections'][1]['repeat_mode'] == 'independent'
+    assert all(mask[30, x] == 2 for x in (7, 57, 107, 157, 207, 257, 307, 357))
+    assert all(mask[100, x] == 2 for x in (7, 107, 207, 307))
+    assert all(mask[100, x] == 1 for x in (57, 157, 257, 357))
 
 
 def test_taxonomy_can_be_renamed_and_deleted_and_bad_refs_rejected(tmp_path):

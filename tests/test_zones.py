@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from track_unwrap import api, zones
-from track_unwrap.zones import assist_polygon, build_zones, load_zones, suggest_half_turn
+from track_unwrap.zones import assist_polygon, build_zones, list_zone_instances, load_zones, suggest_half_turn
 
 
 def make_panorama(folder):
@@ -210,6 +210,31 @@ def test_repetition_tracks_measured_nonuniform_pitch_positions(tmp_path):
     assert mask[30, 325] == 1  # A constant 50 px translation would drift here.
 
 
+def test_one_repeated_segment_can_move_without_moving_its_neighbors(tmp_path):
+    make_panorama(tmp_path)
+    shape = {'id': 'repeat', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': True,
+             'repeat_pitches': 1, 'polygon': [[4, 15], [10, 15], [10, 55], [4, 55]]}
+    taxonomy = groups()[:1]
+    build_zones(tmp_path, taxonomy, [shape])
+    before = list_zone_instances(tmp_path, 'geometry', 'groove')['instances']
+    chosen = min(before, key=lambda item: abs(np.mean([p[0] for p in item['polygon']]) - 107))
+    old_center = np.mean(chosen['polygon'], axis=0)
+    shape['offsets'] = {str(chosen['placement']): [8, 60]}
+    build_zones(tmp_path, taxonomy, [shape])
+    after = list_zone_instances(tmp_path, 'geometry', 'groove')['instances']
+    moved = next(item for item in after if item['placement'] == chosen['placement'])
+    assert np.allclose(np.mean(moved['polygon'], axis=0), old_center + [8, 60], atol=.02)
+    other_before = next(item for item in before if item['placement'] == chosen['placement'] - 1)
+    other_after = next(item for item in after if item['placement'] == chosen['placement'] - 1)
+    assert other_after['polygon'] == other_before['polygon']
+    mask = cv2.imread(str(tmp_path / 'zones' / 'group_geometry_mask.png'), 0)
+    assert mask[30, round(old_center[0])] == 1
+    assert mask[90, round(old_center[0] + 8)] == 2
+    assert mask[30, round(np.mean(other_before['polygon'], axis=0)[0])] == 2
+    with pytest.raises(ValueError, match='이동 범위'):
+        build_zones(tmp_path, taxonomy, [{**shape, 'offsets': {'0': [9999, 0]}}])
+
+
 def test_repeat_width_guard_and_edge_assist_does_not_save(tmp_path):
     make_panorama(tmp_path)
     initial = build_zones(tmp_path)
@@ -257,6 +282,8 @@ def test_api_classification_contract_and_no_auto_damage(tmp_path, monkeypatch):
         assert suggestion.status_code == 200, suggestion.text
         assert isinstance(suggestion.json()['candidates'], list)
         assert load_zones(result)['shapes'] == []
+        instances = client.get(f'/api/jobs/{job_id}/zones/instances', params={'group_id': 'geometry', 'section_id': 'groove'})
+        assert instances.status_code == 200 and instances.json()['instances'] == []
         assert client.get(f'/api/jobs/{job_id}/zones/groups/process/overlay.png').status_code == 200
         assert client.get(f'/api/jobs/{job_id}/zones/groups/process/authored.png').status_code == 200
         assert client.get(f'/api/jobs/{job_id}/zones/groups/unknown/overlay.png').status_code == 404

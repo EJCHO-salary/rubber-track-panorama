@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import OpenSeadragon from 'openseadragon'
 import { Maximize2, Minus, Plus } from 'lucide-react'
-import type { Point, ZoneAnalysis, ZoneShape } from '../types'
+import type { Point, ZoneAnalysis, ZoneInstance, ZoneShape } from '../types'
 import { fileBase, zoneFileBase } from '../api'
 import styles from '../pages/ZoneWorkspace.module.css'
 
@@ -16,6 +16,11 @@ type Props = {
   opacity: number
   focusShape: { polygon: Point[]; nonce: number } | null
   suggestedPolygon: Point[] | null
+  segmentInstances: ZoneInstance[]
+  adjustingSegments: boolean
+  selectedSegment: { shapeId: string; placement: number } | null
+  onSegmentSelect: (shapeId: string, placement: number) => void
+  onSegmentMove: (shapeId: string, placement: number, offset: Point) => void
   onAdd: (point: Point) => void
   onInsert: (index: number, point: Point) => void
   onMoveStart: (index: number) => void
@@ -28,7 +33,8 @@ type Props = {
 }
 
 export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, closedShapes, selectedVertex, opacity,
-  focusShape, suggestedPolygon, onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete, onClose, onClosedMove, onClosedDelete }: Props) {
+  focusShape, suggestedPolygon, segmentInstances, adjustingSegments, selectedSegment, onSegmentSelect, onSegmentMove,
+  onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete, onClose, onClosedMove, onClosedDelete }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<SVGSVGElement>(null)
   const viewer = useRef<OpenSeadragon.Viewer | null>(null)
@@ -37,6 +43,8 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
   const pointerStart = useRef<Point | null>(null)
   const moved = useRef(false)
   const panPointer = useRef<{ id: number; position: Point } | null>(null)
+  const segmentDrag = useRef<{ key: string; id: number; start: Point; offset: Point; shapeId: string; placement: number } | null>(null)
+  const [segmentPreview, setSegmentPreview] = useState<{ key: string; delta: Point } | null>(null)
   const [panning, setPanning] = useState(false)
   const [ready, setReady] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -126,6 +134,46 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     if (mapped.x < 0 || mapped.x >= width || mapped.y < 0 || mapped.y >= height) return null
     return [Math.round(mapped.x), Math.round(mapped.y)]
   }
+  function rawImagePoint(event: React.PointerEvent): Point {
+    const rect = host.current!.getBoundingClientRect()
+    const mapped = viewer.current!.viewport.viewerElementToImageCoordinates(
+      new OpenSeadragon.Point(event.clientX - rect.left, event.clientY - rect.top))
+    return [mapped.x, mapped.y]
+  }
+  function beginSegmentDrag(event: React.PointerEvent<SVGGElement>, instance: ZoneInstance) {
+    if (event.button !== 0 || !viewer.current || !host.current) return
+    event.preventDefault(); event.stopPropagation()
+    const key = `${instance.shape_id}:${instance.placement}`
+    segmentDrag.current = { key, id: event.pointerId, start: rawImagePoint(event), offset: instance.offset,
+      shapeId: instance.shape_id, placement: instance.placement }
+    setSegmentPreview({ key, delta: [0, 0] })
+    onSegmentSelect(instance.shape_id, instance.placement)
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+  function segmentDelta(event: React.PointerEvent, drag: NonNullable<typeof segmentDrag.current>): Point {
+    const at = rawImagePoint(event)
+    const maxX = analysis.pitch_px * 1.5, maxY = analysis.image_size_wh[1] * .5
+    const absolute: Point = [Math.max(-maxX, Math.min(maxX, drag.offset[0] + at[0] - drag.start[0])),
+      Math.max(-maxY, Math.min(maxY, drag.offset[1] + at[1] - drag.start[1]))]
+    return [absolute[0] - drag.offset[0], absolute[1] - drag.offset[1]]
+  }
+  function dragSegment(event: React.PointerEvent<SVGGElement>) {
+    const drag = segmentDrag.current
+    if (!drag || drag.id !== event.pointerId) return
+    event.preventDefault(); event.stopPropagation()
+    setSegmentPreview({ key: drag.key, delta: segmentDelta(event, drag) })
+  }
+  function endSegmentDrag(event: React.PointerEvent<SVGGElement>, save: boolean) {
+    const drag = segmentDrag.current
+    if (!drag || drag.id !== event.pointerId) return
+    event.preventDefault(); event.stopPropagation()
+    const delta = segmentDelta(event, drag)
+    if (save && Math.hypot(...delta) > 1) {
+      onSegmentMove(drag.shapeId, drag.placement, [drag.offset[0] + delta[0], drag.offset[1] + delta[1]])
+    }
+    segmentDrag.current = null; setSegmentPreview(null)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+  }
   function startMiddlePan(event: React.PointerEvent<HTMLDivElement>) {
     if (event.button !== 1 || !ready || !viewer.current || !host.current) return
     event.preventDefault()
@@ -200,6 +248,25 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
         })}
       </g>)}
       {suggestedPolygon && <polygon points={polygon(suggestedPolygon)} className={styles.symmetrySuggestion} />}
+      {adjustingSegments && segmentInstances.map(instance => {
+        const key = `${instance.shape_id}:${instance.placement}`
+        const xs = instance.polygon.map(point => point[0]), ys = instance.polygon.map(point => point[1])
+        const center: Point = [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2]
+        const [cx, cy] = project(center)
+        if (cx < -20 || cx > size.width + 20 || cy < -20 || cy > size.height + 20) return null
+        const delta = segmentPreview?.key === key ? segmentPreview.delta : [0, 0]
+        const shifted = instance.polygon.map(([x, y]): Point => [x + delta[0], y + delta[1]])
+        const [hx, hy] = project([center[0] + delta[0], center[1] + delta[1]])
+        const active = selectedSegment?.shapeId === instance.shape_id && selectedSegment.placement === instance.placement
+        return <g key={key} className={styles.segmentHandle} style={{ pointerEvents: 'all' }}
+          onPointerDown={event => beginSegmentDrag(event, instance)} onPointerMove={dragSegment}
+          onPointerUp={event => endSegmentDrag(event, true)} onPointerCancel={event => endSegmentDrag(event, false)}
+          onClick={event => event.stopPropagation()}>
+          {(active || segmentPreview?.key === key) && <polygon points={polygon(shifted)} className={styles.segmentOutline} pointerEvents="none" />}
+          <circle cx={hx} cy={hy} r={active ? 13 : 11} className={active ? styles.segmentHandleActive : styles.segmentHandleCircle} />
+          <path d={`M ${hx-5} ${hy} h 10 M ${hx} ${hy-5} v 10`} className={styles.segmentHandleCross} />
+        </g>
+      })}
       {points.length > 1 && <polyline points={polygon(points)} className={styles.draftLine} />}
       {editing && points.length >= 2 && points.map((point, index) => {
         const next = points[(index + 1) % points.length]
@@ -227,6 +294,8 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     <div className={styles.zoomControls}><button onClick={() => viewer.current?.viewport.zoomBy(1.4)} aria-label="확대"><Plus size={17} /></button>
       <button onClick={() => viewer.current?.viewport.zoomBy(1/1.4)} aria-label="축소"><Minus size={17} /></button>
       <button onClick={() => viewer.current?.viewport.goHome()} aria-label="전체 보기"><Maximize2 size={17} /></button></div>
-    <div className={styles.canvasHint}>{editing ? '첫 점 클릭으로 도형 닫기 · 휠 확대·축소 · 휠 버튼 드래그로 이동 · 닫힌 도형 점 드래그' : '휠로 확대 · 왼쪽 또는 휠 버튼 드래그로 이동'}</div>
+    <div className={styles.canvasHint}>{editing ? '첫 점 클릭으로 도형 닫기 · 휠 확대·축소 · 휠 버튼 드래그로 이동 · 닫힌 도형 점 드래그'
+      : adjustingSegments ? '십자 핸들 드래그로 이 세그먼트만 이동 · 빈 사진 드래그로 화면 이동'
+      : '휠로 확대 · 왼쪽 또는 휠 버튼 드래그로 이동'}</div>
   </div>
 }

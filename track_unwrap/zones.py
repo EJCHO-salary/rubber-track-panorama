@@ -140,8 +140,28 @@ def _validate(groups, shapes, width, height, pitch_px, max_pitch_px=None):
             raise ValueError('반복 간격은 1~2000피치의 정수로 입력하세요.')
         if repeat and np.ptp(coords[:, 0]) > (max_pitch_px or pitch_px) * repeat_pitches * 1.1:
             raise ValueError('반복 형상은 설정한 반복 간격 안에서 그려 주세요.')
+        offsets = shape.get('offsets', {})
+        if not isinstance(offsets, dict) or len(offsets) > 2000:
+            raise ValueError('개별 세그먼트 보정값이 올바르지 않습니다.')
+        clean_offsets = {}
+        for placement, delta in offsets.items():
+            if not isinstance(placement, str) or not re.fullmatch(r'-?\d{1,5}', placement) or str(int(placement)) != placement:
+                raise ValueError('개별 세그먼트 번호가 올바르지 않습니다.')
+            if not isinstance(delta, (list, tuple)) or len(delta) != 2:
+                raise ValueError('개별 세그먼트 이동 좌표가 올바르지 않습니다.')
+            try:
+                dx, dy = map(float, delta)
+            except (TypeError, ValueError) as exc:
+                raise ValueError('개별 세그먼트 이동 좌표가 올바르지 않습니다.') from exc
+            if not np.isfinite([dx, dy]).all() or abs(dx) > pitch_px * 1.5 or abs(dy) > height * .5:
+                raise ValueError('개별 세그먼트 이동 범위를 확인하세요.')
+            if dx or dy:
+                clean_offsets[placement] = [dx, dy]
+        if not repeat and any(key != '0' for key in clean_offsets):
+            raise ValueError('반복하지 않는 형상은 한 위치만 조정할 수 있습니다.')
         clean_shapes.append({'id': shape_id, 'group_id': group_id, 'section_id': section_id,
-                             'polygon': polygon, 'repeat': repeat, 'repeat_pitches': repeat_pitches})
+                             'polygon': polygon, 'repeat': repeat, 'repeat_pitches': repeat_pitches,
+                             'offsets': clean_offsets})
     return clean_groups, clean_shapes
 
 
@@ -266,10 +286,10 @@ def suggest_half_turn(result_dir, polygon, repeat_pitches):
             'reason': None if candidates else '사진 안에 표시할 대칭 후보가 없습니다.'}
 
 
-def _draw(mask, authored, polygon, code, repeat, period_pitches, anchors, original_size, placements=None, phase_pitch=None):
+def _placed_polygons(shape, anchors, original_size, placements=None, phase_pitch=None):
     width, height = original_size
-    sx, sy = mask.shape[1] / width, mask.shape[0] / height
-    pts = np.asarray(polygon, dtype=np.float64)
+    pts = np.asarray(shape['polygon'], dtype=np.float64)
+    repeat, period_pitches = shape['repeat'], shape['repeat_pitches']
     source = int(np.floor(_to_pitch(pts[:, 0].min(), anchors) / period_pitches)) if repeat else 0
     if placements is None:
         placements = (range(int(np.floor(_to_pitch(0, anchors)/period_pitches))-1,
@@ -281,8 +301,17 @@ def _draw(mask, authored, polygon, code, repeat, period_pitches, anchors, origin
             target_pitch = (source_pitch + (index-source)*period_pitches if phase_pitch is None
                             else phase_pitch + index*period_pitches)
             shifted[:, 0] = _from_pitch(_to_pitch(pts[:, 0], anchors) - source_pitch + target_pitch, anchors)
+        shifted += np.asarray(shape.get('offsets', {}).get(str(index), [0, 0]), dtype=float)
         if shifted[:, 0].max() < 0 or shifted[:, 0].min() > width:
             continue
+        yield index, shifted
+
+
+def _draw(mask, authored, shape, code, anchors, original_size, placements=None, phase_pitch=None):
+    width, height = original_size
+    sx, sy = mask.shape[1] / width, mask.shape[0] / height
+    for _, placed in _placed_polygons(shape, anchors, original_size, placements, phase_pitch):
+        shifted = placed.copy()
         shifted[:, 0] *= sx
         shifted[:, 1] *= sy
         contour = [np.rint(shifted).astype(np.int32)]
@@ -313,6 +342,26 @@ def _shape_lane(shape, height):
     return 'center'
 
 
+def _group_placement_plans(group, shapes, anchors, size):
+    """Resolve alternatives once; mask rendering and editor handles share this plan."""
+    group_shapes = [shape for shape in shapes if shape['group_id'] == group['id']]
+    plans = {shape['id']: (None, None) for shape in group_shapes}
+    for section in group['sections']:
+        if section['repeat_mode'] != 'examples':
+            continue
+        pitches_set = {shape['repeat_pitches'] for shape in group_shapes
+                       if shape['section_id'] == section['id'] and shape['repeat']}
+        for pitches in pitches_set:
+            peers = [shape for shape in group_shapes if shape['section_id'] == section['id']
+                     and shape['repeat'] and shape['repeat_pitches'] == pitches]
+            for lane in {_shape_lane(shape, size[1]) for shape in peers}:
+                lane_peers = [shape for shape in peers if _shape_lane(shape, size[1]) == lane]
+                choices, phase = _exemplar_placements(lane_peers, pitches, anchors, size[0])
+                for shape in lane_peers:
+                    plans[shape['id']] = ([target for target, chosen in choices.items() if chosen == shape['id']], phase)
+    return plans
+
+
 def load_zones(result_dir):
     path = Path(result_dir) / 'zones' / 'analysis.json'
     if not path.is_file():
@@ -322,10 +371,35 @@ def load_zones(result_dir):
         return None
     for shape in data.get('shapes', []):
         shape.setdefault('repeat_pitches', 1)
+        shape.setdefault('offsets', {})
     for group in data.get('groups', []):
         for section in group.get('sections', []):
             section.setdefault('repeat_mode', 'independent')
     return data
+
+
+def list_zone_instances(result_dir, group_id, section_id):
+    """Expose the exact placed polygons used by the rasterizer for manual adjustment."""
+    data = load_zones(result_dir) or build_zones(result_dir)
+    group = next((item for item in data['groups'] if item['id'] == group_id), None)
+    if group is None or section_id not in {item['id'] for item in group['sections']}:
+        raise ValueError('분류 체계 또는 섹션을 찾을 수 없습니다.')
+    anchors = np.asarray(data['pitch_anchors_x'], dtype=float)
+    size = tuple(data['image_size_wh'])
+    plans = _group_placement_plans(group, data['shapes'], anchors, size)
+    instances = []
+    for shape in data['shapes']:
+        if shape['group_id'] != group_id or shape['section_id'] != section_id:
+            continue
+        placements, phase = plans[shape['id']]
+        for index, polygon in _placed_polygons(shape, anchors, size, placements, phase):
+            instances.append({'shape_id': shape['id'], 'section_id': section_id, 'placement': index,
+                              'polygon': [[round(float(x), 2), round(float(y), 2)] for x, y in polygon],
+                              'offset': shape.get('offsets', {}).get(str(index), [0, 0])})
+            if len(instances) > 5000:
+                raise ValueError('세그먼트가 너무 많습니다. 형상을 나누어 조정해 주세요.')
+    return {'group_id': group_id, 'section_id': section_id, 'instances': instances,
+            'created_at': data['created_at']}
 
 
 def build_zones(result_dir, groups=None, shapes=None):
@@ -348,29 +422,11 @@ def build_zones(result_dir, groups=None, shapes=None):
         default = group['default_section_id']
         mask = np.full((h, w), codes[default], np.uint8)
         authored = np.zeros((h, w), np.uint8)
-        modes = {section['id']: section['repeat_mode'] for section in sections}
-        exemplar_maps = {}
-        for section in sections:
-            if section['repeat_mode'] != 'examples':
-                continue
-            for pitches in {shape['repeat_pitches'] for shape in shapes
-                            if shape['group_id'] == group['id'] and shape['section_id'] == section['id'] and shape['repeat']}:
-                peers = [shape for shape in shapes if shape['group_id'] == group['id']
-                         and shape['section_id'] == section['id'] and shape['repeat'] and shape['repeat_pitches'] == pitches]
-                for lane in {_shape_lane(shape, size[1]) for shape in peers}:
-                    lane_peers = [shape for shape in peers if _shape_lane(shape, size[1]) == lane]
-                    exemplar_maps[(section['id'], pitches, lane)] = _exemplar_placements(lane_peers, pitches, anchors, size[0])
+        plans = _group_placement_plans(group, shapes, anchors, size)
         for shape in shapes:
             if shape['group_id'] == group['id']:
-                if shape['repeat'] and modes[shape['section_id']] == 'examples':
-                    placements, phase = exemplar_maps[(shape['section_id'], shape['repeat_pitches'], _shape_lane(shape, size[1]))]
-                    for target, chosen in placements.items():
-                        if chosen == shape['id']:
-                            _draw(mask, authored, shape['polygon'], codes[shape['section_id']], True,
-                                  shape['repeat_pitches'], anchors, size, [target], phase)
-                else:
-                    _draw(mask, authored, shape['polygon'], codes[shape['section_id']], shape['repeat'],
-                          shape['repeat_pitches'], anchors, size)
+                placements, phase = plans[shape['id']]
+                _draw(mask, authored, shape, codes[shape['section_id']], anchors, size, placements, phase)
         overlay = np.zeros((h, w, 4), np.uint8)
         areas, explicit_areas = {}, {}
         edges = cv2.morphologyEx(authored, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8)) > 0

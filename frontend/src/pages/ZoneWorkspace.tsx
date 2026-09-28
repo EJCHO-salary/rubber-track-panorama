@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, ArrowLeft, Check, ChevronRight, Eraser, Eye, Layers3, Magnet, PenLine, Plus, Trash2, Undo2, X } from 'lucide-react'
+import { AlertCircle, ArrowLeft, Check, ChevronRight, Eraser, Eye, Layers3, Magnet, Move, PenLine, Plus, Trash2, Undo2, X } from 'lucide-react'
 import { Link, useParams } from 'react-router'
 import { api, formatNumber } from '../api'
 import type { HalfTurnResult, Point, ZoneAnalysis, ZoneGroup, ZoneSection, ZoneShape } from '../types'
@@ -30,11 +30,18 @@ export default function ZoneWorkspace() {
   const [error, setError] = useState(''), [assistNote, setAssistNote] = useState('')
   const [halfTurnProposal, setHalfTurnProposal] = useState<{ source: ZoneShape; result: HalfTurnResult; selected: number } | null>(null)
   const [expandedSaved, setExpandedSaved] = useState<string | null>(null)
+  const [segmentTarget, setSegmentTarget] = useState<{ groupId: string; sectionId: string } | null>(null)
+  const [selectedSegment, setSelectedSegment] = useState<{ shapeId: string; placement: number } | null>(null)
   const group = analysis?.groups.find(item => item.id === groupId) ?? analysis?.groups[0]
   const section = group?.sections.find(item => item.id === sectionId) ?? group?.sections[0]
   const groupShapes = analysis?.shapes.filter(item => item.group_id === group?.id) ?? []
   const savedSections = group?.sections.map(item => ({ section: item, shapes: groupShapes.filter(shape => shape.section_id === item.id) })).filter(item => item.shapes.length) ?? []
   const metrics = group ? analysis?.group_metrics[group.id] : undefined
+  const adjustingSegments = !!group && !!section && !editing && segmentTarget?.groupId === group.id && segmentTarget.sectionId === section.id
+  const instancesQuery = useQuery({ queryKey: ['zone-instances', id, segmentTarget?.groupId, segmentTarget?.sectionId, analysis?.created_at],
+    queryFn: () => api.zoneInstances(id, segmentTarget!.groupId, segmentTarget!.sectionId), enabled: adjustingSegments })
+  const instances = adjustingSegments ? instancesQuery.data?.instances ?? [] : []
+  const currentSegment = selectedSegment && instances.find(item => item.shape_id === selectedSegment.shapeId && item.placement === selectedSegment.placement)
   useEffect(() => {
     if (!editing) setRepeatPitches(analysis?.shapes.find(shape => shape.group_id === group?.id && shape.section_id === section?.id && shape.repeat)?.repeat_pitches ?? 1)
   }, [editing, group?.id, section?.id, analysis?.created_at, analysis?.shapes])
@@ -91,6 +98,7 @@ export default function ZoneWorkspace() {
     setClosed(shapes.map(shape => ({ ...shape, polygon: copy(shape.polygon) })))
     setHistory([]); setSelectedVertex(null); setAssistNote(''); setError(''); setShowOverlay(true); setHalfTurnProposal(null)
     setSectionId(targetSectionId)
+    setSegmentTarget(null); setSelectedSegment(null)
     if (first) setFocusShape({ polygon: first.polygon, nonce: Date.now() })
   }
   function begin(shape?: ZoneShape) {
@@ -118,12 +126,13 @@ export default function ZoneWorkspace() {
     setHalfTurnProposal(null)
     const pitches = Math.max(1, Math.min(2000, value || 1))
     setRepeatPitches(pitches)
-    setClosed(items => items.map(shape => ({ ...shape, repeat_pitches: pitches })))
+    setClosed(items => items.map(shape => ({ ...shape, repeat_pitches: pitches,
+      offsets: shape.repeat_pitches === pitches ? shape.offsets : {} })))
   }
   function changeRepeat(value: boolean) {
     setHalfTurnProposal(null)
     setRepeat(value)
-    setClosed(items => items.map(shape => ({ ...shape, repeat: value })))
+    setClosed(items => items.map(shape => ({ ...shape, repeat: value, offsets: shape.repeat === value ? shape.offsets : {} })))
   }
   function removePoint(index: number) { remember(); setDraft(items => items.filter((_, i) => i !== index)); setSelectedVertex(null) }
   function undo() { if (history.length) { setDraft(history[history.length-1]); setHistory(items => items.slice(0, -1)); setSelectedVertex(null) } }
@@ -161,9 +170,28 @@ export default function ZoneWorkspace() {
     if (!halfTurnProposal || !group || !section) return
     const candidate = halfTurnProposal.result.candidates[halfTurnProposal.selected]
     if (!candidate) return
-    setClosed(items => [...items, { ...halfTurnProposal.source, id: uid(), polygon: copy(candidate.polygon) }])
+    setClosed(items => [...items, { ...halfTurnProposal.source, id: uid(), polygon: copy(candidate.polygon), offsets: {} }])
     setHalfTurnProposal(null)
     setAssistNote('대칭 후보를 닫힌 도형에 추가했습니다. 점을 조정하거나 제외한 뒤 한 번에 저장하세요.')
+  }
+  function toggleSegmentAdjustment(sectionId: string) {
+    if (!group) return
+    if (segmentTarget?.groupId === group.id && segmentTarget.sectionId === sectionId) {
+      setSegmentTarget(null); setSelectedSegment(null)
+    } else {
+      setSegmentTarget({ groupId: group.id, sectionId }); setSectionId(sectionId); setSelectedSegment(null)
+    }
+  }
+  function moveSegment(shapeId: string, placement: number, offset: Point) {
+    if (!analysis || !group || busy) return
+    const next = analysis.shapes.map(shape => {
+      if (shape.id !== shapeId || shape.group_id !== group.id) return shape
+      const offsets = { ...shape.offsets }
+      if (Math.abs(offset[0]) < .5 && Math.abs(offset[1]) < .5) delete offsets[String(placement)]
+      else offsets[String(placement)] = [Math.round(offset[0] * 100) / 100, Math.round(offset[1] * 100) / 100]
+      return { ...shape, offsets }
+    })
+    commit(analysis.groups, next)
   }
   useEffect(() => {
     if (!editing) return
@@ -200,7 +228,9 @@ export default function ZoneWorkspace() {
         <ZoneCanvas jobId={id} groupId={group?.id ?? null} analysis={analysis} editing={editing} points={draft} closedShapes={closed} selectedVertex={selectedVertex}
           opacity={showOverlay ? opacity : 0} focusShape={focusShape} suggestedPolygon={halfTurnProposal?.result.candidates[halfTurnProposal.selected]?.polygon ?? null} onAdd={add} onInsert={insert}
           onMoveStart={remember} onMove={move} onSelect={setSelectedVertex} onDelete={removePoint} onClose={closeCurrent}
-          onClosedMove={moveClosed} onClosedDelete={deleteClosedPoint} />
+          onClosedMove={moveClosed} onClosedDelete={deleteClosedPoint}
+          segmentInstances={instances} adjustingSegments={adjustingSegments} selectedSegment={selectedSegment}
+          onSegmentSelect={(shapeId, placement) => setSelectedSegment({ shapeId, placement })} onSegmentMove={moveSegment} />
         <div className={styles.canvasFooter}>{group?.sections.map(item => <span key={item.id}><i style={{ background: item.color }} />{item.name}</span>)}
           <label className={styles.opacityControl}>색 농도 <input type="range" min="0" max="100" value={Math.round(opacity*100)} onChange={event => setOpacity(Number(event.target.value)/100)} /></label></div>
         {group && <div className={styles.metricGrid}><div><small>전체 픽셀 채움</small><strong>{metrics?.coverage_percent ?? 100}%</strong><small>남는 영역 → {group.sections.find(item => item.id === group.default_section_id)?.name}</small></div>
@@ -244,11 +274,21 @@ export default function ZoneWorkspace() {
           {!editing && section && groupShapes.some(shape => shape.section_id === section.id && shape.repeat) &&
             <div className={styles.bulkRepeat}><strong>{section.name} 저장된 도형 반복 간격</strong><p>이 섹션의 반복 도형 모두에 같은 간격을 적용합니다.</p>
               <input aria-label="저장된 도형 반복 간격" type="number" min="1" max="2000" value={repeatPitches} onChange={event => setRepeatPitches(Math.max(1, Math.min(2000, Number(event.target.value) || 1)))} /> 피치마다
-              <button disabled={busy} onClick={() => commit(analysis.groups, analysis.shapes.map(shape => shape.group_id === group.id && shape.section_id === section.id && shape.repeat ? { ...shape, repeat_pitches: repeatPitches } : shape))}>모든 저장 도형에 적용</button></div>}
+              <button disabled={busy} onClick={() => commit(analysis.groups, analysis.shapes.map(shape => shape.group_id === group.id && shape.section_id === section.id && shape.repeat ? { ...shape, repeat_pitches: repeatPitches, offsets: shape.repeat_pitches === repeatPitches ? shape.offsets : {} } : shape))}>모든 저장 도형에 적용</button></div>}
+          {adjustingSegments && <div className={styles.segmentAdjustPanel}>
+            <div><Move size={16} /><strong>{section?.name} 세그먼트 위치 조정</strong><button onClick={() => { setSegmentTarget(null); setSelectedSegment(null) }} aria-label="위치 조정 닫기"><X size={15} /></button></div>
+            <p>사진 위 십자 핸들을 잡아 해당 배치 하나만 이동하세요. 확대해도 위치가 유지됩니다.</p>
+            {instancesQuery.isLoading && <small>배치 위치를 불러오는 중…</small>}
+            {instancesQuery.isError && <small role="alert">배치 위치를 불러오지 못했습니다.</small>}
+            {currentSegment && <div className={styles.segmentSelection}><span>도형 {groupShapes.filter(shape => shape.section_id === section.id).findIndex(shape => shape.id === currentSegment.shape_id) + 1} · 배치 {currentSegment.placement + 1}<small>이동 X {currentSegment.offset[0].toFixed(1)} px · Y {currentSegment.offset[1].toFixed(1)} px</small></span>
+              <button disabled={busy || Math.hypot(...currentSegment.offset) < .5} onClick={() => moveSegment(currentSegment.shape_id, currentSegment.placement, [0, 0])}>원위치</button></div>}
+          </div>}
           <div className={styles.savedSeeds}><div className={styles.miniHead}><strong>저장된 형상</strong><span>{savedSections.length}개 섹션 · {groupShapes.length}개 도형</span></div>
             {savedSections.length ? savedSections.map(({ section: label, shapes }) => <div className={styles.savedSection} key={label.id}>
               <div className={styles.seedRow}><i style={{ background: label.color }} /><button className={styles.savedSectionToggle} aria-expanded={expandedSaved === label.id}
                 onClick={() => setExpandedSaved(value => value === label.id ? null : label.id)}>{label.name}<small>도형 {shapes.length}개 · 눌러서 개별 형상 보기</small></button>
+                <button className={segmentTarget?.groupId === group.id && segmentTarget.sectionId === label.id ? styles.activeSegmentButton : ''}
+                  aria-label={`${label.name} 배치 위치 조정`} title="반복된 세그먼트 하나씩 위치 조정" onClick={() => toggleSegmentAdjustment(label.id)} disabled={busy || editing}><Move size={15} /></button>
                 <button aria-label={`${label.name} 형상 모두 편집`} title="이 섹션의 도형 모두 편집" onClick={() => beginSection(label.id)} disabled={busy || editing}><PenLine size={15} /></button></div>
               {expandedSaved === label.id && <div className={styles.savedShapeList}>{shapes.map((shape, index) => <div className={styles.savedShapeRow} key={shape.id}>
                 <span>{index + 1}<small>{shape.polygon.length}개 점 · {shape.repeat ? `${shape.repeat_pitches}피치 반복` : '반복 없음'}</small></span>

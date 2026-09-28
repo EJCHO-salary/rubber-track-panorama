@@ -1,4 +1,4 @@
-import type { HalfTurnResult, Job, JobList, Point, SampleList, ZoneAnalysis, ZoneAssistResult, ZoneGroup, ZoneShape } from './types'
+import type { HalfTurnResult, Job, JobList, Point, SampleList, ZoneAnalysis, ZoneAssistResult, ZoneGroup, ZoneInstances, ZoneShape } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, options)
@@ -19,6 +19,8 @@ export const api = {
   }),
   deleteJob: (id: string) => request<{ deleted: boolean; pending: boolean }>(`/api/jobs/${id}`, { method: 'DELETE' }),
   zones: (id: string) => request<ZoneAnalysis>(`/api/jobs/${id}/zones`),
+  zoneInstances: (id: string, groupId: string, sectionId: string) => request<ZoneInstances>(
+    `/api/jobs/${id}/zones/instances?group_id=${encodeURIComponent(groupId)}&section_id=${encodeURIComponent(sectionId)}`),
   saveZones: (id: string, groups: ZoneGroup[], shapes: ZoneShape[]) => request<ZoneAnalysis>(`/api/jobs/${id}/zones`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ groups, shapes }),
   }),

@@ -71,6 +71,22 @@ export interface ZoneShape {
   polygon: Point[]
   repeat: boolean
   repeat_pitches: number
+  offsets?: Record<string, Point>
+}
+
+export interface ZoneInstance {
+  shape_id: string
+  section_id: string
+  placement: number
+  polygon: Point[]
+  offset: Point
+}
+
+export interface ZoneInstances {
+  group_id: string
+  section_id: string
+  instances: ZoneInstance[]
+  created_at: string
 }
 
 export interface ZoneAnalysis {

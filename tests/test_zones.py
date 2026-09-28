@@ -112,6 +112,24 @@ def test_distinct_long_and_short_grooves_both_repeat_every_two_pitches(tmp_path)
     assert all(mask[100, x] == 1 for x in (57, 157, 257, 357))
 
 
+def test_shape_in_default_section_remains_visible_and_measurable(tmp_path):
+    make_panorama(tmp_path)
+    taxonomy = groups()[:1]
+    taxonomy[0]['default_section_id'] = 'groove'
+    shape = {'id': 'explicit', 'group_id': 'geometry', 'section_id': 'groove', 'repeat': False,
+             'polygon': [[4, 15], [10, 15], [10, 55], [4, 55]]}
+    result = build_zones(tmp_path, taxonomy, [shape])
+    folder = tmp_path / 'zones'
+    mask = cv2.imread(str(folder / 'group_geometry_mask.png'), 0)
+    authored = cv2.imread(str(folder / 'group_geometry_authored.png'), 0)
+    overlay = cv2.imread(str(folder / 'group_geometry_overlay.png'), cv2.IMREAD_UNCHANGED)
+    assert mask[30, 7] == mask[30, 20] == 2
+    assert authored[30, 7] == 255 and authored[30, 20] == 0
+    assert overlay[30, 7, 3] > overlay[30, 20, 3]
+    assert result['group_metrics']['geometry']['explicit_areas_mm2']['groove'] > 0
+    assert result['group_metrics']['geometry']['fallback_area_mm2'] < result['group_metrics']['geometry']['areas_mm2']['groove']
+
+
 def test_taxonomy_can_be_renamed_and_deleted_and_bad_refs_rejected(tmp_path):
     make_panorama(tmp_path)
     edited = groups()
@@ -186,5 +204,6 @@ def test_api_classification_contract_and_no_auto_damage(tmp_path, monkeypatch):
         assert saved.status_code == 200, saved.text
         assert len(saved.json()['groups']) == 2
         assert client.get(f'/api/jobs/{job_id}/zones/groups/process/overlay.png').status_code == 200
+        assert client.get(f'/api/jobs/{job_id}/zones/groups/process/authored.png').status_code == 200
         assert client.get(f'/api/jobs/{job_id}/zones/groups/unknown/overlay.png').status_code == 404
         assert client.get(f'/api/jobs/{job_id}/damage').status_code == 404

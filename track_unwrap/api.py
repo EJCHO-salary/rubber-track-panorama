@@ -430,7 +430,7 @@ def assist_job_zone(job_id: str, request: ZoneAssist):
 @app.get('/api/jobs/{job_id}/zones/groups/{group_id}/{kind}.png')
 def job_zone_artifact(job_id: str, group_id: str, kind: str):
     result_dir = _zones_dir(job_id)
-    if kind not in {'mask', 'overlay'} or not re.fullmatch(r'[a-zA-Z0-9_-]{1,40}', group_id):
+    if kind not in {'mask', 'overlay', 'authored'} or not re.fullmatch(r'[a-zA-Z0-9_-]{1,40}', group_id):
         raise HTTPException(404)
     analysis = load_zones(result_dir)
     if not analysis or group_id not in {group['id'] for group in analysis['groups']}:
@@ -454,7 +454,7 @@ def sample_zones(case_name: str):
 
 @app.get('/api/samples/{case_name}/zones/groups/{group_id}/{kind}.png')
 def sample_zone_artifact(case_name: str, group_id: str, kind: str):
-    if case_name not in SAMPLES or kind not in {'mask', 'overlay'} or not re.fullmatch(r'[a-zA-Z0-9_-]{1,40}', group_id):
+    if case_name not in SAMPLES or kind not in {'mask', 'overlay', 'authored'} or not re.fullmatch(r'[a-zA-Z0-9_-]{1,40}', group_id):
         raise HTTPException(404)
     result_dir = ROOT / 'output' / SAMPLES[case_name]
     analysis = load_zones(result_dir)

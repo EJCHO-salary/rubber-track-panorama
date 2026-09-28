@@ -84,7 +84,7 @@ export interface ZoneAnalysis {
   working_pixels_per_mm: number
   groups: ZoneGroup[]
   shapes: ZoneShape[]
-  group_metrics: Record<string, { areas_mm2: Record<string, number>; fallback_area_mm2: number; unassigned_pixels: number; coverage_percent: number }>
+  group_metrics: Record<string, { areas_mm2: Record<string, number>; explicit_areas_mm2?: Record<string, number>; fallback_area_mm2: number; unassigned_pixels: number; coverage_percent: number }>
 }
 
 export interface ZoneAssistResult {

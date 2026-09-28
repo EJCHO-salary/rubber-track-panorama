@@ -181,7 +181,7 @@ def _from_pitch(pitch, anchors):
                     np.where(pitch > len(anchors)-1, anchors[-1]+(pitch-len(anchors)+1)*(anchors[-1]-anchors[-2]), values))
 
 
-def _draw(mask, polygon, code, repeat, period_pitches, anchors, original_size, placements=None, phase_pitch=None):
+def _draw(mask, authored, polygon, code, repeat, period_pitches, anchors, original_size, placements=None, phase_pitch=None):
     width, height = original_size
     sx, sy = mask.shape[1] / width, mask.shape[0] / height
     pts = np.asarray(polygon, dtype=np.float64)
@@ -200,7 +200,9 @@ def _draw(mask, polygon, code, repeat, period_pitches, anchors, original_size, p
             continue
         shifted[:, 0] *= sx
         shifted[:, 1] *= sy
-        cv2.fillPoly(mask, [np.rint(shifted).astype(np.int32)], int(code))
+        contour = [np.rint(shifted).astype(np.int32)]
+        cv2.fillPoly(mask, contour, int(code))
+        cv2.fillPoly(authored, contour, 255)
 
 
 def _exemplar_placements(shapes, period_pitches, anchors, width):
@@ -250,6 +252,7 @@ def build_zones(result_dir, groups=None, shapes=None):
         codes = {item['id']: index + 1 for index, item in enumerate(sections)}
         default = group['default_section_id']
         mask = np.full((h, w), codes[default], np.uint8)
+        authored = np.zeros((h, w), np.uint8)
         modes = {section['id']: section['repeat_mode'] for section in sections}
         exemplar_maps = {}
         for section in sections:
@@ -266,23 +269,30 @@ def build_zones(result_dir, groups=None, shapes=None):
                     placements, phase = exemplar_maps[(shape['section_id'], shape['repeat_pitches'])]
                     for target, chosen in placements.items():
                         if chosen == shape['id']:
-                            _draw(mask, shape['polygon'], codes[shape['section_id']], True,
+                            _draw(mask, authored, shape['polygon'], codes[shape['section_id']], True,
                                   shape['repeat_pitches'], anchors, size, [target], phase)
                 else:
-                    _draw(mask, shape['polygon'], codes[shape['section_id']], shape['repeat'],
+                    _draw(mask, authored, shape['polygon'], codes[shape['section_id']], shape['repeat'],
                           shape['repeat_pitches'], anchors, size)
         overlay = np.zeros((h, w, 4), np.uint8)
-        areas = {}
+        areas, explicit_areas = {}, {}
+        edges = cv2.morphologyEx(authored, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8)) > 0
         mm2_per_pixel = (size[0] / w) * (size[1] / h) / (ppm * ppm)
         for section in sections:
             selected = mask == codes[section['id']]
+            explicit = selected & (authored > 0)
             rgb = tuple(int(section['color'][i:i+2], 16) for i in (1, 3, 5))
             overlay[selected] = (rgb[2], rgb[1], rgb[0], 40 if section['id'] == default else 108)
+            overlay[explicit] = (rgb[2], rgb[1], rgb[0], 132)
+            overlay[selected & edges] = (rgb[2], rgb[1], rgb[0], 220)
             areas[section['id']] = round(int(np.count_nonzero(selected)) * mm2_per_pixel, 2)
+            explicit_areas[section['id']] = round(int(np.count_nonzero(explicit)) * mm2_per_pixel, 2)
         cv2.imwrite(str(folder / f"group_{group['id']}_mask.png"), mask)
+        cv2.imwrite(str(folder / f"group_{group['id']}_authored.png"), authored)
         cv2.imwrite(str(folder / f"group_{group['id']}_overlay.png"), overlay)
         metrics[group['id']] = {'areas_mm2': areas, 'unassigned_pixels': 0, 'coverage_percent': 100.,
-                                'fallback_area_mm2': areas[default]}
+                                'explicit_areas_mm2': explicit_areas,
+                                'fallback_area_mm2': round(int(np.count_nonzero((mask == codes[default]) & (authored == 0))) * mm2_per_pixel, 2)}
     # Remove files for deleted classification layers after the new document is ready.
     active = {group['id'] for group in groups}
     for path in folder.glob('group_*.png'):

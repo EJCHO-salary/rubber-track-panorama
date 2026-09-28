@@ -35,6 +35,8 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
   const draggingClosed = useRef<string | null>(null)
   const pointerStart = useRef<Point | null>(null)
   const moved = useRef(false)
+  const panPointer = useRef<{ id: number; position: Point } | null>(null)
+  const [panning, setPanning] = useState(false)
   const [ready, setReady] = useState(false)
   const [failed, setFailed] = useState(false)
   const [size, setSize] = useState({ width: 1, height: 1 })
@@ -123,6 +125,39 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     if (mapped.x < 0 || mapped.x >= width || mapped.y < 0 || mapped.y >= height) return null
     return [Math.round(mapped.x), Math.round(mapped.y)]
   }
+  function startMiddlePan(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 1 || !ready || !viewer.current || !host.current) return
+    event.preventDefault()
+    event.stopPropagation()
+    panPointer.current = { id: event.pointerId, position: [event.clientX, event.clientY] }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setPanning(true)
+  }
+  function moveMiddlePan(event: React.PointerEvent<HTMLDivElement>) {
+    const pan = panPointer.current
+    const instance = viewer.current
+    const element = host.current
+    if (!pan || pan.id !== event.pointerId || !instance || !element) return
+    event.preventDefault()
+    const bounds = element.getBoundingClientRect()
+    const previous = instance.viewport.viewerElementToViewportCoordinates(
+      new OpenSeadragon.Point(pan.position[0] - bounds.left, pan.position[1] - bounds.top))
+    const current = instance.viewport.viewerElementToViewportCoordinates(
+      new OpenSeadragon.Point(event.clientX - bounds.left, event.clientY - bounds.top))
+    instance.viewport.panBy(previous.minus(current), true)
+    instance.viewport.applyConstraints()
+    pan.position = [event.clientX, event.clientY]
+  }
+  function endMiddlePan(event: React.PointerEvent<HTMLDivElement>) {
+    if (panPointer.current?.id !== event.pointerId) return
+    event.preventDefault()
+    panPointer.current = null
+    setPanning(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+  }
+  function lostMiddlePan(event: React.PointerEvent<HTMLDivElement>) {
+    if (panPointer.current?.id === event.pointerId) { panPointer.current = null; setPanning(false) }
+  }
   const polygon = (items: Point[]) => items.map(point => project(point).join(',')).join(' ')
   const [imageWidth, imageHeight] = analysis.image_size_wh
   const left = project([0, 0]), right = project([imageWidth, imageHeight])
@@ -133,12 +168,15 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
       return screen >= -30 && screen <= size.width + 30
     }) : []
 
-  return <div className={styles.canvasShell}>
-    <div ref={host} className={styles.deepzoom} aria-label="확대 가능한 트랙 전개 사진" />
+  return <div className={styles.canvasShell} onPointerDownCapture={startMiddlePan}
+    onPointerMove={moveMiddlePan} onPointerUp={endMiddlePan} onPointerCancel={endMiddlePan}
+    onLostPointerCapture={lostMiddlePan}
+    onAuxClick={event => { if (event.button === 1) event.preventDefault() }}>
+    <div ref={host} className={styles.deepzoom} aria-label="확대 가능한 트랙 전개 사진" style={{ cursor: panning ? 'grabbing' : undefined }} />
     {failed && <div className={styles.canvasFailure}>확대 이미지를 불러오지 못했습니다.</div>}
     {ready && <svg ref={overlayRef} className={styles.overlay} width={size.width} height={size.height}
-      style={{ pointerEvents: editing ? 'auto' : 'none', cursor: editing ? 'crosshair' : 'default' }}
-      onClick={event => { const point = unproject(event); if (editing && point) onAdd(point) }}>
+      style={{ pointerEvents: editing ? 'auto' : 'none', cursor: panning ? 'grabbing' : editing ? 'crosshair' : 'default' }}
+      onClick={event => { const point = unproject(event); if (editing && event.button === 0 && point) onAdd(point) }}>
       {groupId && <image href={`${zoneFileBase(jobId, groupId)}/overlay.png?v=${encodeURIComponent(analysis.created_at)}`}
         x={left[0]} y={left[1]} width={right[0]-left[0]} height={right[1]-left[1]}
         preserveAspectRatio="none" opacity={opacity} pointerEvents="none" />}
@@ -187,6 +225,6 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     <div className={styles.zoomControls}><button onClick={() => viewer.current?.viewport.zoomBy(1.4)} aria-label="확대"><Plus size={17} /></button>
       <button onClick={() => viewer.current?.viewport.zoomBy(1/1.4)} aria-label="축소"><Minus size={17} /></button>
       <button onClick={() => viewer.current?.viewport.goHome()} aria-label="전체 보기"><Maximize2 size={17} /></button></div>
-    <div className={styles.canvasHint}>{editing ? '첫 점 클릭으로 도형 닫기 · 다음 클릭으로 새 도형 · 휠 확대·축소 · 닫힌 도형도 점 드래그' : '휠로 확대 · 드래그로 이동'}</div>
+    <div className={styles.canvasHint}>{editing ? '첫 점 클릭으로 도형 닫기 · 휠 확대·축소 · 휠 버튼 드래그로 이동 · 닫힌 도형 점 드래그' : '휠로 확대 · 왼쪽 또는 휠 버튼 드래그로 이동'}</div>
   </div>
 }

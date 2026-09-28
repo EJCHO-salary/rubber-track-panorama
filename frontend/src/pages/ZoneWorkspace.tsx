@@ -172,7 +172,8 @@ export default function ZoneWorkspace() {
         <div className={styles.canvasFooter}>{group?.sections.map(item => <span key={item.id}><i style={{ background: item.color }} />{item.name}</span>)}
           <label className={styles.opacityControl}>색 농도 <input type="range" min="0" max="100" value={Math.round(opacity*100)} onChange={event => setOpacity(Number(event.target.value)/100)} /></label></div>
         {group && <div className={styles.metricGrid}><div><small>전체 픽셀 채움</small><strong>{metrics?.coverage_percent ?? 100}%</strong><small>남는 영역 → {group.sections.find(item => item.id === group.default_section_id)?.name}</small></div>
-          {group.sections.map(item => <div key={item.id}><small><i style={{ background: item.color }} />{item.name}</small><strong>{formatNumber(metrics?.areas_mm2[item.id] ?? 0)} <em>mm²</em></strong><small>형상 {groupShapes.filter(shape => shape.section_id === item.id).length}개</small></div>)}</div>}
+          {group.sections.map(item => <div key={item.id}><small><i style={{ background: item.color }} />{item.name}</small><strong>{formatNumber(metrics?.areas_mm2[item.id] ?? 0)} <em>mm²</em></strong>
+            <small>직접 지정 {formatNumber(metrics?.explicit_areas_mm2?.[item.id] ?? 0)} mm² · 형상 {groupShapes.filter(shape => shape.section_id === item.id).length}개</small></div>)}</div>}
       </section>
       <aside className={styles.inspector}><div className={styles.inspectorBody}>
         {group ? <>

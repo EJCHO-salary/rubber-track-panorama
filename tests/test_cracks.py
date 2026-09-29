@@ -6,7 +6,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from track_unwrap import api
-from track_unwrap.cracks import _dark_fissure_mask, add_manual_crack, delete_manual_crack, load_cracks, propose_cracks, review_crack, review_cracks
+from track_unwrap.cracks import (_dark_fissure_mask, _repeated_structure_support,
+                                 _suggest_damage_type, add_manual_crack,
+                                 delete_manual_crack, load_cracks, propose_cracks,
+                                 review_crack, review_cracks)
 from track_unwrap.zones import build_zones
 
 
@@ -34,6 +37,8 @@ def test_unique_fissure_can_be_reviewed_and_counted_by_section(tmp_path):
     assert fissures, 'unique dark fissure should have a reviewable proposal'
     candidate = fissures[0]
     assert candidate['status'] == 'pending'
+    assert candidate['damage_type'] is None
+    assert 'suggested_damage_type' in candidate
     reviewed = review_crack(tmp_path, candidate['id'], 'accepted')
     assert reviewed['totals']['accepted'] == 1
     assert reviewed['summary']['surface']['accepted'] == 1
@@ -91,6 +96,27 @@ def test_dark_core_rejects_bright_relief_and_chalk_edge():
     assert binary[20, 16] == 1
     assert binary[20, 51] == 0
     assert binary[20, 76] == 0
+
+
+def test_repeated_geometry_does_not_suppress_unique_fissure():
+    gray = np.full((100, 500), 160, np.uint8)
+    response = np.zeros_like(gray)
+    for pitch in range(10):
+        x = pitch * 50 + 10
+        gray[10:60, x:x+4] = 35
+        response[10:60, x:x+4] = 80
+    gray[65:95, 282:285] = 15
+    response[65:95, 282:285] = 80
+    support = _repeated_structure_support(gray, response, list(range(0, 501, 50)), 1.)
+    assert support[30, 62] >= .75
+    assert support[80, 283] < .2
+
+
+def test_damage_type_hint_requires_geometry_and_exposed_edge():
+    assert _suggest_damage_type(18, 30, 4, .05)[0] == 'tear'
+    assert _suggest_damage_type(30, 12, 2, .3)[0] == 'chip_cut'
+    assert _suggest_damage_type(120, 13, 1.5, .4)[0] == 'chunk'
+    assert _suggest_damage_type(120, 13, 1.5, .05)[0] is None
 
 
 def test_reproposal_keeps_reviewed_candidate_and_manual_path(tmp_path):

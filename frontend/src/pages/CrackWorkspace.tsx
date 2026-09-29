@@ -59,7 +59,7 @@ export default function CrackWorkspace() {
     const candidate = candidates.find(item => item.id === candidateId)
     if (!candidate) return
     setSelectedIds(items => items.includes(candidateId) ? items.filter(item => item !== candidateId) : shift ? [...items, candidateId] : [candidateId])
-    setDamageType(shift ? null : candidate.damage_type ?? null)
+    setDamageType(shift ? null : candidate.damage_type ?? candidate.suggested_damage_type ?? null)
     if (zoom) {
       setFocus({ polygon: candidate.polygon, nonce: Date.now() })
       requestAnimationFrame(() => canvasPanelRef.current?.scrollIntoView({ block: 'start' }))
@@ -117,7 +117,9 @@ export default function CrackWorkspace() {
       {data.ready && <><div className={styles.stats}><div><strong>{formatNumber(data.totals?.proposed ?? 0)}</strong><small>미검토</small></div><div><strong>{formatNumber(data.totals?.accepted ?? 0)}</strong><small>채택</small></div><div><strong>{formatNumber(data.totals?.excluded ?? 0)}</strong><small>제외</small></div></div>
         <div className={styles.sectionCounts}><strong>영역별 집계</strong>{data.sections?.map(section => <div key={section.id}><span><i style={{ background: section.color }} />{section.name}</span><small>후보 {data.summary?.[section.id]?.proposed ?? 0} · 채택 {data.summary?.[section.id]?.accepted ?? 0}</small></div>)}</div>
         {selectedIds.length > 0 && <div className={styles.selected}><div><strong>선택한 후보 {selectedIds.length}개</strong><span>{selected ? `${data.sections?.find(item => item.id === selected.section_id)?.name} · ${selected.area_mm2?.toFixed(1) ?? '—'} mm²` : `최소 표시 면적 ${threshold.toFixed(1)} mm²`}</span></div>
-          <p>손상 유형을 지정한 후 선택한 후보를 함께 판정하세요.</p>
+          <p>{selected?.suggestion_reason && !selected.damage_type
+            ? `영상 초안 · ${selected.suggestion_reason} 채택 전 확인해 주세요.`
+            : '손상 유형을 지정한 후 선택한 후보를 함께 판정하세요.'}</p>
           <div className={styles.damageTypes}>{damageTypes.map(type => <button key={type.id} type="button" className={damageType === type.id ? styles.damageActive : ''} onClick={() => setDamageType(type.id)}>{type.label}</button>)}</div>
           <label className={styles.autoOption}><input type="checkbox" checked={autoLarger} disabled={threshold <= 0} onChange={event => setAutoLarger(event.target.checked)} /> 같은 면적 이상인 미검토 자동 후보도 채택 <strong>{threshold > 0 ? autoCount : 0}개</strong></label>
           <small className={styles.autoHint}>이미 제외했거나 직접 판정한 후보는 자동으로 바꾸지 않습니다.</small>
@@ -128,7 +130,7 @@ export default function CrackWorkspace() {
           {selected?.source === 'manual' && <button className={styles.deleteManual} disabled={removeManual.isPending} onClick={() => removeManual.mutate(selected.id)}><Trash2 size={14} /> 이 수동 경로 삭제</button>}</div>}
         <div className={styles.candidateHeader}><strong>후보 목록</strong><small>{filtered.length}개 표시</small></div><div className={styles.filters}><select aria-label="영역 필터" value={sectionId} onChange={event => setSectionId(event.target.value)}><option value="all">전체 영역</option>{data.sections?.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
           <select aria-label="검토 상태 필터" value={status} onChange={event => setStatus(event.target.value)}><option value="all">전체 상태</option><option value="pending">미검토</option><option value="accepted">채택</option><option value="excluded">제외</option></select></div>
-        <div className={styles.candidateList}>{filtered.map((item, index) => <button key={item.id} className={selectedIds.includes(item.id) ? styles.candidateActive : styles.candidate} onClick={event => choose(item.id, true, event.shiftKey)}><i data-status={item.status} /><span>{item.source === 'manual' ? '수동 표시' : `후보 ${index+1}`}<small>{data.sections?.find(section => section.id === item.section_id)?.name} · {item.area_mm2?.toFixed(1) ?? '—'} mm² · {item.damage_type ? damageTypes.find(type => type.id === item.damage_type)?.label : '미분류'}</small></span><b>{item.source === 'manual' ? '직접' : item.score.toFixed(2)}</b></button>)}</div>
+        <div className={styles.candidateList}>{filtered.map((item, index) => <button key={item.id} className={selectedIds.includes(item.id) ? styles.candidateActive : styles.candidate} onClick={event => choose(item.id, true, event.shiftKey)}><i data-status={item.status} /><span>{item.source === 'manual' ? '수동 표시' : `후보 ${index+1}`}<small>{data.sections?.find(section => section.id === item.section_id)?.name} · {item.area_mm2?.toFixed(1) ?? '—'} mm² · {item.damage_type ? `확정 ${damageTypes.find(type => type.id === item.damage_type)?.label}` : item.suggested_damage_type ? `제안 ${damageTypes.find(type => type.id === item.suggested_damage_type)?.label}` : '유형 확인 필요'}</small></span><b>{item.source === 'manual' ? '직접' : item.score.toFixed(2)}</b></button>)}</div>
       </>}
     </aside></div>
   </div>

@@ -1,0 +1,21 @@
+[
+  {"center": [3650, 1851], "kind": "structure", "note": "반복 골부 측벽", "show": true},
+  {"center": [3201, 2010], "kind": "structure", "note": "반복 골부 측벽"},
+  {"center": [9739, 1562], "kind": "structure", "note": "반복 골부 측벽"},
+  {"center": [10285, 772], "kind": "structure", "note": "반복 골부 측벽"},
+  {"center": [7968, 1120], "kind": "structure", "note": "스프라켓 홀 벽", "show": true},
+  {"center": [226, 929], "kind": "structure", "note": "스프라켓 홀 윗테두리"},
+  {"center": [4041, 1043], "kind": "structure", "note": "스프라켓 홀 측벽"},
+  {"center": [10117, 1157], "kind": "structure", "note": "스프라켓 홀 측벽"},
+  {"center": [2266, 1172], "kind": "structure", "note": "스프라켓 홀 측벽"},
+  {"center": [1701, 1097], "kind": "damage", "type": "tear", "note": "홀 사이 불규칙 선형 균열", "show": true},
+  {"center": [5691, 2078], "kind": "damage", "type": "tear", "note": "트레드 밑동 선형 균열"},
+  {"center": [3952, 604], "kind": "damage", "type": "chip_cut", "note": "밝은 찢김 경계가 있는 국소 결손", "show": true},
+  {"center": [10038, 1109], "kind": "damage", "note": "작은 독립 균열"},
+  {"center": [406, 1170], "kind": "damage", "note": "홀 사이의 작은 균열"},
+  {"center": [2301, 840], "kind": "damage", "note": "작은 파임"},
+  {"center": [10008, 1041], "kind": "damage", "type": "chip_cut", "note": "국소 뜯김과 노출 경계"},
+  {"center": [9174, 1097], "kind": "damage", "type": "tear", "note": "홀 옆 선형 균열"},
+  {"center": [4601, 2134], "kind": "damage", "type": "tear", "note": "골부의 선형 균열"},
+  {"center": [5462, 2040], "kind": "damage", "type": "tear", "note": "트레드 밑동 균열"}
+]

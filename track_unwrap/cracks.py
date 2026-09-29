@@ -33,6 +33,8 @@ def load_cracks(result_dir):
         ppm = float(zones['nominal_pixels_per_mm']) if zones else 1.
     for candidate in data.get('candidates', []):
         candidate.setdefault('damage_type', None)
+        candidate.setdefault('suggested_damage_type', None)
+        candidate.setdefault('suggestion_reason', None)
         candidate.setdefault('decision_source', 'manual' if candidate['status'] != 'pending' else None)
         candidate.setdefault('area_mm2', _polygon_area(candidate['polygon']) / ppm ** 2)
     return _summary(data)
@@ -104,6 +106,90 @@ def _pattern_residual(response, anchors, scale_x):
     return residual
 
 
+def _repeated_structure_support(gray, response, anchors, scale_x):
+    """Estimate whether darkness recurs at the same location in other pitches.
+
+    The candidate's own pitch is excluded, so one unusual crack cannot vote for
+    itself. Two-pitch parity accommodates alternating tread and groove shapes.
+    """
+    h, w = gray.shape
+    positions = np.rint(np.asarray(anchors) / scale_x).astype(int)
+    spans = [(index, int(positions[index]), int(positions[index + 1]))
+             for index in range(len(positions) - 1)
+             if 0 <= positions[index] < positions[index + 1] <= w
+             and positions[index + 1] - positions[index] >= 20]
+    support = np.zeros((h, w), np.float32)
+    for parity in (0, 1):
+        strips, locations = [], []
+        for index, left, right in spans:
+            if index % 2 != parity:
+                continue
+            darkness = np.uint8((gray[:, left:right] < 125) & (response[:, left:right] > 16))
+            normalized = cv2.resize(darkness, (128, h), interpolation=cv2.INTER_NEAREST)
+            strips.append(cv2.dilate(normalized, np.ones((5, 9), np.uint8)) > 0)
+            locations.append((left, right))
+        if len(strips) < 4:
+            continue
+        stack = np.stack(strips)
+        counts = np.sum(stack, axis=0)
+        for index, (left, right) in enumerate(locations):
+            other_pitches = (counts - stack[index]) / (len(strips) - 1)
+            support[:, left:right] = cv2.resize(other_pitches.astype(np.float32), (right-left, h))
+    return support
+
+
+def _periodic_hole_band(gray, anchors, scale_x):
+    """Find the central band where pitch anchors repeatedly contain cavities."""
+    h, w = gray.shape
+    positions = np.rint(np.asarray(anchors) / scale_x).astype(int)
+    if len(positions) < 6:
+        return None
+    pitch = float(np.median(np.diff(positions)))
+    radius = max(2, round(pitch * .04))
+    midpoints = np.rint((positions[:-1] + positions[1:]) / 2).astype(int)
+    anchor_profiles = [np.median(gray[:, x-radius:x+radius], axis=1)
+                       for x in positions if radius <= x <= w-radius]
+    midpoint_profiles = [np.median(gray[:, x-radius:x+radius], axis=1)
+                         for x in midpoints if radius <= x <= w-radius]
+    if min(len(anchor_profiles), len(midpoint_profiles)) < 5:
+        return None
+    contrast = np.median(midpoint_profiles, axis=0) - np.median(anchor_profiles, axis=0)
+    contrast = cv2.GaussianBlur(contrast.astype(np.float32)[:, None], (1, 0), 0,
+                                sigmaY=max(2, h * .012))[:, 0]
+    central = contrast[round(h*.2):round(h*.8)]
+    peak = int(np.argmax(central) + round(h*.2))
+    if contrast[peak] < 35:
+        return None
+    limit = max(25, float(contrast[peak]) * .35)
+    top, bottom = peak, peak
+    while top > 0 and contrast[top-1] > limit:
+        top -= 1
+    while bottom < h-1 and contrast[bottom+1] > limit:
+        bottom += 1
+    return (top, bottom) if bottom-top >= h*.08 else None
+
+
+def _bright_rim_fraction(gray, labels, label, x, y, width, height):
+    pad = 5
+    left, top = max(0, x-pad), max(0, y-pad)
+    right, bottom = min(gray.shape[1], x+width+pad), min(gray.shape[0], y+height+pad)
+    component = np.uint8(labels[top:bottom, left:right] == label)
+    ring = (cv2.dilate(component, np.ones((5, 5), np.uint8)) > 0) & (component == 0)
+    return float(np.mean(gray[top:bottom, left:right][ring] >= 180)) if np.any(ring) else 0.
+
+
+def _suggest_damage_type(area_mm2, length_mm, elongation, bright_rim):
+    """Conservative image-only morphology hint; a user must confirm the mode."""
+    width_mm = area_mm2 / max(length_mm, .1)
+    if area_mm2 >= 100 and width_mm >= 6 and elongation < 2.5 and bright_rim >= .3:
+        return 'chunk', '넓고 불규칙한 결손과 밝은 노출 경계가 함께 보입니다.'
+    if area_mm2 >= 10 and width_mm >= 1.5 and bright_rim >= .18:
+        return 'chip_cut', '선형 균열보다 폭이 넓고 밝은 절단·뜯김 경계가 보입니다.'
+    if length_mm >= 12 and width_mm <= 1.9 and elongation >= 2.2:
+        return 'tear', '폭이 좁고 길게 이어진 어두운 균열입니다.'
+    return None, None
+
+
 def _dark_fissure_mask(gray, response, zone_mask, sensitivity):
     """Require a connected near-black core, not merely local edge contrast.
 
@@ -170,6 +256,10 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
         cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))),
         cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19))))
     scale_x, scale_y = original.shape[1] / w, original.shape[0] / h
+    repeated_support = _repeated_structure_support(gray, response, zones['pitch_anchors_x'], scale_x)
+    hole_band = _periodic_hole_band(gray, zones['pitch_anchors_x'], scale_x)
+    anchor_positions = np.asarray(zones['pitch_anchors_x'], dtype=float) / scale_x
+    pitch_spacing = float(np.median(np.diff(anchor_positions)))
     response = _pattern_residual(response, zones['pitch_anchors_x'], scale_x)
     # The classification mask fills all gaps with a default section. Only the
     # separately rasterized, user-authored polygons are valid crack territory.
@@ -183,6 +273,17 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
         if area < 7 or area > 1400 or max(bw, bh) < 9 or bw > w * .15 or bh > h * .4:
             continue
         roi = labels[y:y+bh, x:x+bw] == label
+        structural_score = float(np.mean(repeated_support[y:y+bh, x:x+bw][roi]))
+        if structural_score >= .75:
+            continue
+        # A horizontal dark lip recurring at the top/bottom of the central
+        # sprocket opening is image geometry, not a rubber fissure.
+        if hole_band and structural_score >= .55 and bw > bh * 1.8:
+            center_x, center_y = x + bw / 2, y + bh / 2
+            near_anchor = np.min(np.abs(anchor_positions - center_x)) < pitch_spacing * .32
+            near_rim = min(abs(center_y - hole_band[0]), abs(center_y - hole_band[1])) < max(5, h * .025)
+            if near_anchor and near_rim:
+                continue
         core = np.uint8(roi & (gray[y:y+bh, x:x+bw] <= core_limit))
         core_count, _, core_stats, _ = cv2.connectedComponentsWithStats(core, 8)
         longest_core = max((max(int(sw), int(sh)) for _, _, sw, sh, pixels in core_stats[1:]
@@ -215,11 +316,16 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
         polygon = [[round((x + float(px)) * scale_x, 1), round((y + float(py)) * scale_y, 1)] for px, py in outline]
         if not _inside_authored({'polygon': polygon}, authored, scale_x, scale_y):
             continue
+        area_mm2 = round(_polygon_area(polygon) / ppm ** 2, 2)
+        suggestion, reason = _suggest_damage_type(
+            area_mm2, length_mm, elongation, _bright_rim_fraction(gray, labels, label, x, y, bw, bh))
         candidates.append({'id': uuid4().hex[:12], 'section_id': group['sections'][section_code-1]['id'],
                            'polygon': polygon, 'status': 'pending', 'source': 'automatic', 'damage_type': None,
+                           'suggested_damage_type': suggestion, 'suggestion_reason': reason,
+                           'repeated_structure_score': round(structural_score, 2),
                            'decision_source': None,
                            'length_mm': round(length_mm, 1), 'contrast': round(contrast, 1), 'score': score,
-                           'area_mm2': round(_polygon_area(polygon) / ppm ** 2, 2),
+                           'area_mm2': area_mm2,
                            'bbox': [round(x*scale_x, 1), round(y*scale_y, 1), round(bw*scale_x, 1), round(bh*scale_y, 1)]})
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = candidates[:400]

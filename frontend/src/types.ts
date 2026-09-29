@@ -124,6 +124,9 @@ export interface CrackCandidate {
   source: 'automatic' | 'manual'
   damage_type?: 'chunk' | 'tear' | 'chip_cut' | null
   decision_source?: 'manual' | 'auto' | null
+  suggested_damage_type?: 'chunk' | 'tear' | 'chip_cut' | null
+  suggestion_reason?: string | null
+  repeated_structure_score?: number
   area_mm2?: number
   length_mm: number
   contrast: number

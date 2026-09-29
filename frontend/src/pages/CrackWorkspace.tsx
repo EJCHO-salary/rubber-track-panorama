@@ -33,6 +33,11 @@ export default function CrackWorkspace() {
   const proposal = useMutation({ mutationFn: () => api.proposeCracks(id, groupId, sensitivity),
     onSuccess: (data: CrackReview) => { queryClient.setQueryData(['cracks', id], data); setSelectedIds([]); setError('') },
     onError: (cause: Error) => setError(cause.message) })
+  const clear = useMutation({ mutationFn: () => api.clearCracks(id),
+    onSuccess: (data: CrackReview) => { queryClient.setQueryData(['cracks', id], data); setSelectedIds([]); setDamageType(null);
+      setFocus(null); setDrawing(false); setManualPoints([]); setSectionId('all'); setStatus('all');
+      setError(''); setNotice('크랙 후보와 판정 기록을 모두 삭제했습니다. 새 후보 찾기를 눌러 다시 추출하세요.') },
+    onError: (cause: Error) => setError(cause.message) })
   const decision = useMutation({ mutationFn: ({ ids, next, type, auto }: { ids: string[]; next: 'pending' | 'accepted' | 'excluded'; type?: DamageType; auto: boolean }) => api.reviewCracks(id, ids, next, type, auto),
     onSuccess: (data: CrackReview) => { queryClient.setQueryData(['cracks', id], data); setError(''); setNotice(`${data.last_review?.selected ?? 0}개 판정${data.last_review?.auto_accepted ? ` · 큰 후보 ${data.last_review.auto_accepted}개 자동 채택` : ''}`) },
     onError: (cause: Error) => setError(cause.message) })
@@ -72,6 +77,9 @@ export default function CrackWorkspace() {
     if (next === 'accepted' && !damageType) { setError('채택할 손상 유형을 먼저 선택해 주세요.'); return }
     decision.mutate({ ids: selectedIds, next, type: next === 'accepted' ? damageType! : undefined, auto: next === 'accepted' && autoLarger && threshold > 0 })
   }
+  function clearAll() {
+    if (window.confirm('이 작업의 크랙 후보, 채택·제외 판정, 수동 표시를 모두 삭제할까요? 영역 지정과 원본 사진은 유지됩니다.')) clear.mutate()
+  }
   if (zones.isLoading || review.isLoading) return <div className={styles.loading}>크랙 검토 화면을 준비하고 있습니다…</div>
   if (!zones.data || !data) return <div className={styles.loading}>검토 데이터를 불러오지 못했습니다.</div>
   const currentGroup = zones.data.groups.find(item => item.id === data.group_id) ?? zones.data.groups[0]
@@ -97,7 +105,8 @@ export default function CrackWorkspace() {
       <div className={styles.setup}><strong>후보 탐색</strong><p>그레이스케일에서 연속된 거의 검은 핵심부를 찾고, 분필 자국 주변과 반복 형상 경계를 억제합니다. 결과는 검토용 초안입니다.</p>
         <label>분류 체계<select value={groupId} onChange={event => setGroupId(event.target.value)}>{zones.data.groups.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <label>민감도<select value={sensitivity} onChange={event => setSensitivity(event.target.value as typeof sensitivity)}><option value="low">낮음 · 강한 후보</option><option value="normal">보통</option><option value="high">높음 · 작은 후보 포함</option></select></label>
-        <button className={styles.propose} disabled={proposal.isPending || decision.isPending} onClick={() => proposal.mutate()}><ScanSearch size={16} /> {proposal.isPending ? '탐색 중…' : data.ready ? '후보 다시 찾기' : '크랙 후보 찾기'}</button>
+        <button className={styles.propose} disabled={proposal.isPending || clear.isPending || decision.isPending || manual.isPending || removeManual.isPending} onClick={() => proposal.mutate()}><ScanSearch size={16} /> {proposal.isPending ? '탐색 중…' : data.ready ? '후보 다시 찾기' : '크랙 후보 찾기'}</button>
+        {data.ready && <button className={styles.clearAll} disabled={proposal.isPending || clear.isPending || decision.isPending || manual.isPending || removeManual.isPending} onClick={clearAll}><Trash2 size={14} /> {clear.isPending ? '삭제 중…' : '후보·판정 전체 삭제'}</button>}
         {data.ready && <small>같은 영역 지도에서 다시 찾으면 채택·제외 및 수동 표시 기록이 유지됩니다.</small>}
         {data.stale && <div className={styles.stale}>영역 지도가 변경되었습니다. 후보를 다시 찾아 주세요.</div>}
         {data.ready && !data.stale && <div className={styles.manualTool}><strong>놓친 균열 직접 표시</strong>

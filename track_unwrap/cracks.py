@@ -38,6 +38,12 @@ def load_cracks(result_dir):
     return _summary(data)
 
 
+def clear_cracks(result_dir):
+    """Discard all proposals and review decisions without touching the zone map."""
+    _, path = _paths(result_dir)
+    path.unlink(missing_ok=True)
+
+
 def _polygon_area(points):
     if len(points) < 3:
         return 0.

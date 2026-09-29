@@ -2,7 +2,9 @@ import json
 
 import cv2
 import numpy as np
+from fastapi.testclient import TestClient
 
+from track_unwrap import api
 from track_unwrap.cracks import _dark_fissure_mask, add_manual_crack, delete_manual_crack, load_cracks, propose_cracks, review_crack, review_cracks
 from track_unwrap.zones import build_zones
 
@@ -103,3 +105,35 @@ def test_reproposal_keeps_reviewed_candidate_and_manual_path(tmp_path):
     assert again['totals']['accepted'] == 1
     assert {item['id'] for item in again['candidates'] if item['status'] != 'pending'} == {
         reviewed['candidates'][0]['id'], manual['candidates'][0]['id']}
+
+
+def test_clear_all_candidates_then_repropose_from_current_detector(tmp_path, monkeypatch):
+    image = np.full((200, 500, 3), 155, np.uint8)
+    cv2.line(image, (183, 22), (211, 61), (15, 15, 15), 3)
+    cv2.imwrite(str(tmp_path / 'panorama.png'), image)
+    (tmp_path / 'quality_report.json').write_text(json.dumps({
+        'settings': {'width_mm': 80, 'pitch_mm': 20, 'pixels_per_mm': 2.5},
+    }), encoding='utf-8')
+    build_zones(tmp_path, [{'id': 'geometry', 'name': '형상', 'default_section_id': 'surface',
+        'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866', 'repeat_mode': 'independent'}]}], [])
+    zone_path = tmp_path / 'zones' / 'analysis.json'
+    monkeypatch.setattr(api, '_zones_dir', lambda _: tmp_path)
+    job_id = 'a' * 32
+    with TestClient(api.app) as client:
+        first = client.post(f'/api/jobs/{job_id}/cracks/propose', json={'group_id': 'geometry', 'sensitivity': 'high'}).json()
+        assert first['candidates']
+        review_crack(tmp_path, first['candidates'][0]['id'], 'excluded')
+        add_manual_crack(tmp_path, [[270, 22], [280, 40], [292, 51]])
+        assert client.get(f'/api/jobs/{job_id}/cracks').json()['totals']['excluded'] == 1
+
+        cleared = client.delete(f'/api/jobs/{job_id}/cracks')
+        assert cleared.status_code == 200 and cleared.json() == {'ready': False, 'stale': False}
+        assert client.get(f'/api/jobs/{job_id}/cracks').json() == {'ready': False, 'stale': False}
+        assert not (tmp_path / 'cracks' / 'review.json').exists()
+        assert zone_path.exists()
+        assert client.delete(f'/api/jobs/{job_id}/cracks').status_code == 200
+
+        fresh = client.post(f'/api/jobs/{job_id}/cracks/propose', json={'group_id': 'geometry', 'sensitivity': 'high'}).json()
+        assert fresh['candidates']
+        assert fresh['totals']['excluded'] == fresh['totals']['accepted'] == 0
+        assert all(item['status'] == 'pending' and item['source'] == 'automatic' for item in fresh['candidates'])

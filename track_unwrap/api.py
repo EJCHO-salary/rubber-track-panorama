@@ -18,7 +18,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, StrictInt
 
 from .zones import assist_polygon, build_zones, list_zone_instances, load_zones, suggest_half_turn
-from .cracks import add_manual_crack, delete_manual_crack, load_cracks, propose_cracks, review_crack, review_cracks
+from .cracks import add_manual_crack, clear_cracks, delete_manual_crack, load_cracks, propose_cracks, review_crack, review_cracks
 from .pipeline import Settings, unwrap
 
 
@@ -480,6 +480,14 @@ def get_job_cracks(job_id: str):
             return {'ready': False, 'stale': False}
         zones = load_zones(result_dir)
         return {**data, 'ready': True, 'stale': not zones or data['zone_created_at'] != zones['created_at']}
+
+
+@app.delete('/api/jobs/{job_id}/cracks')
+def clear_job_cracks(job_id: str):
+    result_dir = _zones_dir(job_id)
+    with _zone_lock(job_id):
+        clear_cracks(result_dir)
+        return {'ready': False, 'stale': False}
 
 
 @app.post('/api/jobs/{job_id}/cracks/propose')

@@ -31,6 +31,7 @@ export const api = {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ polygon, repeat_pitches }),
   }),
   cracks: (id: string) => request<CrackReview>(`/api/jobs/${id}/cracks`),
+  clearCracks: (id: string) => request<CrackReview>(`/api/jobs/${id}/cracks`, { method: 'DELETE' }),
   proposeCracks: (id: string, group_id: string, sensitivity: 'low' | 'normal' | 'high') => request<CrackReview>(`/api/jobs/${id}/cracks/propose`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id, sensitivity }),
   }),

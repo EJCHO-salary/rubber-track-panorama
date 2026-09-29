@@ -3,7 +3,7 @@ import json
 import cv2
 import numpy as np
 
-from track_unwrap.cracks import add_manual_crack, delete_manual_crack, load_cracks, propose_cracks, review_crack, review_cracks
+from track_unwrap.cracks import _dark_fissure_mask, add_manual_crack, delete_manual_crack, load_cracks, propose_cracks, review_crack, review_cracks
 from track_unwrap.zones import build_zones
 
 
@@ -64,3 +64,42 @@ def test_batch_classification_and_area_rule_preserve_explicit_decisions(tmp_path
     assert changed['totals']['excluded'] == 3
     assert changed['accepted_by_type']['chunk'] == 1
     assert load_cracks(tmp_path)['candidates'][1]['decision_source'] == 'manual'
+
+
+def test_dark_core_rejects_bright_relief_and_chalk_edge():
+    gray = np.full((80, 100), 145, np.uint8)
+    response = np.zeros_like(gray)
+    mask = np.ones_like(gray)
+    gray[12:45, 15:18] = 25
+    response[12:45, 15:18] = 80
+    gray[12:45, 50:53] = 105
+    response[12:45, 50:53] = 80
+    gray[12:45, 75:78] = 25
+    gray[12:45, 78:81] = 230
+    response[12:45, 75:78] = 80
+    binary, core_limit = _dark_fissure_mask(gray, response, mask, 'normal')
+    assert core_limit <= 72
+    assert binary[20, 16] == 1
+    assert binary[20, 51] == 0
+    assert binary[20, 76] == 0
+
+
+def test_reproposal_keeps_reviewed_candidate_and_manual_path(tmp_path):
+    image = np.full((200, 500, 3), 155, np.uint8)
+    cv2.line(image, (183, 22), (211, 61), (15, 15, 15), 3)
+    cv2.imwrite(str(tmp_path / 'panorama.png'), image)
+    (tmp_path / 'quality_report.json').write_text(json.dumps({
+        'settings': {'width_mm': 80, 'pitch_mm': 20, 'pixels_per_mm': 2.5},
+    }), encoding='utf-8')
+    taxonomy = [{'id': 'geometry', 'name': '형상', 'default_section_id': 'surface',
+                 'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866', 'repeat_mode': 'independent'}]}]
+    build_zones(tmp_path, taxonomy, [])
+    first = propose_cracks(tmp_path, 'geometry', 'high')
+    assert first['candidates']
+    reviewed = review_crack(tmp_path, first['candidates'][0]['id'], 'excluded')
+    manual = add_manual_crack(tmp_path, [[270, 22], [280, 40], [292, 51]])
+    again = propose_cracks(tmp_path, 'geometry', 'normal')
+    assert again['totals']['excluded'] == 1
+    assert again['totals']['accepted'] == 1
+    assert {item['id'] for item in again['candidates'] if item['status'] != 'pending'} == {
+        reviewed['candidates'][0]['id'], manual['candidates'][0]['id']}

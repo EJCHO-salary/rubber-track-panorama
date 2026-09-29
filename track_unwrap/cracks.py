@@ -98,8 +98,36 @@ def _pattern_residual(response, anchors, scale_x):
     return residual
 
 
+def _dark_fissure_mask(gray, response, zone_mask, sensitivity):
+    """Require a connected near-black core, not merely local edge contrast.
+
+    A per-image low percentile accommodates exposure differences, while a hard
+    upper bound prevents chalk marks and ordinary rubber relief from qualifying.
+    """
+    rubber = gray[zone_mask > 0]
+    if rubber.size == 0:
+        return np.zeros_like(gray, dtype=np.uint8), 0
+    core_limit = int(np.clip(np.percentile(rubber, 1) + 10, 48, 72))
+    weak_limit = min({'low': 76, 'normal': 88, 'high': 98}[sensitivity], core_limit + 27)
+    contrast_limit = {'low': 45, 'normal': 34, 'high': 25}[sensitivity]
+    dark = (gray <= weak_limit) & (response >= contrast_limit) & (zone_mask > 0)
+    # A dark line along a bright chalk stroke is often its cast edge, not a fissure.
+    chalk_halo = cv2.dilate(np.uint8(gray >= 205), np.ones((5, 5), np.uint8)) > 0
+    dark &= ~chalk_halo
+    binary = cv2.morphologyEx(np.uint8(dark), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    return binary, core_limit
+
+
+def _same_damage_location(first, second):
+    ax, ay, aw, ah = first['bbox']
+    bx, by, bw, bh = second['bbox']
+    overlap = max(0., min(ax + aw, bx + bw) - max(ax, bx)) * max(0., min(ay + ah, by + bh) - max(ay, by))
+    smaller = min(aw * ah, bw * bh)
+    return smaller > 0 and overlap / smaller >= .5
+
+
 def propose_cracks(result_dir, group_id, sensitivity='normal'):
-    """Generate high-recall, deliberately unclassified crack candidates."""
+    """Regenerate dark-core candidates while retaining explicit human review."""
     if sensitivity not in {'low', 'normal', 'high'}:
         raise ValueError('민감도는 low, normal, high 중 하나여야 합니다.')
     zones = load_zones(result_dir)
@@ -108,6 +136,7 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
     group = next((item for item in zones['groups'] if item['id'] == group_id), None)
     if not group:
         raise ValueError('분류 체계를 찾을 수 없습니다.')
+    previous = load_cracks(result_dir)
     mask = cv2.imread(str(Path(result_dir) / 'zones' / f'group_{group_id}_mask.png'), cv2.IMREAD_GRAYSCALE)
     original = cv2.imread(str(Path(result_dir) / 'panorama.png'), cv2.IMREAD_GRAYSCALE)
     if mask is None or original is None:
@@ -121,9 +150,7 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
         cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19))))
     scale_x, scale_y = original.shape[1] / w, original.shape[0] / h
     response = _pattern_residual(response, zones['pitch_anchors_x'], scale_x)
-    threshold = {'low': 58, 'normal': 43, 'high': 32}[sensitivity]
-    binary = np.uint8(response >= threshold)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    binary, core_limit = _dark_fissure_mask(gray, response, mask, sensitivity)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
     ppm = float(zones['nominal_pixels_per_mm'])
     candidates = []
@@ -132,12 +159,18 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
         if area < 7 or area > 1400 or max(bw, bh) < 9 or bw > w * .15 or bh > h * .4:
             continue
         roi = labels[y:y+bh, x:x+bw] == label
+        core = np.uint8(roi & (gray[y:y+bh, x:x+bw] <= core_limit))
+        core_count, _, core_stats, _ = cv2.connectedComponentsWithStats(core, 8)
+        longest_core = max((max(int(sw), int(sh)) for _, _, sw, sh, pixels in core_stats[1:]
+                            if pixels >= 4), default=0)
+        if longest_core < 5 or np.count_nonzero(core) < max(4, int(area * .06)):
+            continue
         yy, xx = np.nonzero(roi)
         xy = np.column_stack((xx, yy)).astype(np.float32)
         covariance = np.cov(xy, rowvar=False)
         eigen = np.linalg.eigvalsh(covariance)
         elongation = float(np.sqrt((eigen[1] + 1) / (eigen[0] + 1)))
-        if elongation < 2.0:
+        if elongation < 1.7 and not (area >= 35 and np.count_nonzero(core) >= area * .35):
             continue
         section_pixels = mask[y:y+bh, x:x+bw][roi]
         section_code = int(np.bincount(section_pixels, minlength=len(group['sections'])+1)[1:].argmax() + 1)
@@ -164,6 +197,10 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
                            'bbox': [round(x*scale_x, 1), round(y*scale_y, 1), round(bw*scale_x, 1), round(bh*scale_y, 1)]})
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = candidates[:400]
+    if previous and previous.get('group_id') == group_id and previous.get('zone_created_at') == zones['created_at']:
+        reviewed = [item for item in previous['candidates'] if item['status'] != 'pending']
+        candidates = reviewed + [item for item in candidates
+                                 if not any(_same_damage_location(item, saved) for saved in reviewed)]
     data = {'version': 1, 'created_at': datetime.now(timezone.utc).isoformat(), 'zone_created_at': zones['created_at'],
             'group_id': group_id, 'sensitivity': sensitivity, 'image_size_wh': zones['image_size_wh'],
             'pixels_per_mm': ppm,

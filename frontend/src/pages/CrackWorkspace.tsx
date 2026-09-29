@@ -94,11 +94,11 @@ export default function CrackWorkspace() {
         hint={drawing ? '사진을 따라 점을 찍어 균열 경로를 그리세요 · 휠 확대 · 휠 버튼으로 이동' : '드래그 선택 · Shift+드래그 추가 · 다시 선택하여 해제 · 휠 확대 · 휠 버튼 이동'} />
       <div className={styles.legend}><span><i className={styles.pendingDot} /> 미검토 영역</span><span><i className={styles.acceptedDot} /> 채택 영역</span><span><i className={styles.excludedDot} /> 제외 영역</span><span><i className={styles.selectionDot} /> 현재 선택</span></div>
     </section><aside className={styles.sidePanel}>
-      <div className={styles.setup}><strong>후보 탐색</strong><p>사진의 어두운 선형 특징에서 시작해 2피치 반복 형상을 배경으로 억제합니다. 결과는 검토용 초안입니다.</p>
+      <div className={styles.setup}><strong>후보 탐색</strong><p>그레이스케일에서 연속된 거의 검은 핵심부를 찾고, 분필 자국 주변과 반복 형상 경계를 억제합니다. 결과는 검토용 초안입니다.</p>
         <label>분류 체계<select value={groupId} onChange={event => setGroupId(event.target.value)}>{zones.data.groups.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <label>민감도<select value={sensitivity} onChange={event => setSensitivity(event.target.value as typeof sensitivity)}><option value="low">낮음 · 강한 후보</option><option value="normal">보통</option><option value="high">높음 · 작은 후보 포함</option></select></label>
         <button className={styles.propose} disabled={proposal.isPending || decision.isPending} onClick={() => proposal.mutate()}><ScanSearch size={16} /> {proposal.isPending ? '탐색 중…' : data.ready ? '후보 다시 찾기' : '크랙 후보 찾기'}</button>
-        {data.ready && <small>다시 찾으면 현재 채택·제외 및 수동 표시 기록이 초기화됩니다.</small>}
+        {data.ready && <small>같은 영역 지도에서 다시 찾으면 채택·제외 및 수동 표시 기록이 유지됩니다.</small>}
         {data.stale && <div className={styles.stale}>영역 지도가 변경되었습니다. 후보를 다시 찾아 주세요.</div>}
         {data.ready && !data.stale && <div className={styles.manualTool}><strong>놓친 균열 직접 표시</strong>
           {drawing ? <><p>사진을 따라 2개 이상의 점을 찍으세요. 점을 끌어 경로를 조정할 수 있습니다.</p><div><button onClick={() => { setDrawing(false); setManualPoints([]) }} disabled={manual.isPending}>취소</button>

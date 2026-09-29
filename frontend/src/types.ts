@@ -122,6 +122,9 @@ export interface CrackCandidate {
   bbox: [number, number, number, number]
   status: 'pending' | 'accepted' | 'excluded'
   source: 'automatic' | 'manual'
+  damage_type?: 'chunk' | 'tear' | 'chip_cut' | null
+  decision_source?: 'manual' | 'auto' | null
+  area_mm2?: number
   length_mm: number
   contrast: number
   score: number
@@ -138,4 +141,6 @@ export interface CrackReview {
   candidates?: CrackCandidate[]
   summary?: Record<string, { proposed: number; accepted: number; excluded: number; length_mm: number }>
   totals?: { proposed: number; accepted: number; excluded: number; length_mm: number }
+  accepted_by_type?: Record<'chunk' | 'tear' | 'chip_cut' | 'unclassified', number>
+  last_review?: { selected: number; auto_accepted: number }
 }

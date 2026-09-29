@@ -14,6 +14,9 @@ import numpy as np
 from .zones import load_zones
 
 
+DAMAGE_TYPES = {'chunk', 'tear', 'chip_cut'}
+
+
 def _paths(result_dir):
     folder = Path(result_dir) / 'cracks'
     return folder, folder / 'review.json'
@@ -23,7 +26,22 @@ def load_cracks(result_dir):
     _, path = _paths(result_dir)
     if not path.is_file():
         return None
-    return json.loads(path.read_text(encoding='utf-8'))
+    data = json.loads(path.read_text(encoding='utf-8'))
+    ppm = data.get('pixels_per_mm')
+    if not ppm:
+        zones = load_zones(result_dir)
+        ppm = float(zones['nominal_pixels_per_mm']) if zones else 1.
+    for candidate in data.get('candidates', []):
+        candidate.setdefault('damage_type', None)
+        candidate.setdefault('decision_source', 'manual' if candidate['status'] != 'pending' else None)
+        candidate.setdefault('area_mm2', _polygon_area(candidate['polygon']) / ppm ** 2)
+    return _summary(data)
+
+
+def _polygon_area(points):
+    if len(points) < 3:
+        return 0.
+    return float(cv2.contourArea(np.asarray(points, dtype=np.float32)))
 
 
 def _write(result_dir, data):
@@ -49,6 +67,10 @@ def _summary(data):
     data['totals'] = {key: round(sum(value[key] for value in sections.values()), 1) if key == 'length_mm'
                       else sum(value[key] for value in sections.values())
                       for key in ('proposed', 'accepted', 'excluded', 'length_mm')}
+    data['accepted_by_type'] = {key: sum(item['status'] == 'accepted' and item.get('damage_type') == key
+                                      for item in data['candidates']) for key in sorted(DAMAGE_TYPES)}
+    data['accepted_by_type']['unclassified'] = sum(item['status'] == 'accepted' and not item.get('damage_type')
+                                                   for item in data['candidates'])
     return data
 
 
@@ -135,28 +157,60 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
         score = round(min(1., (contrast / 105) * min(elongation / 4, 1.)), 3)
         polygon = [[round((x + float(px)) * scale_x, 1), round((y + float(py)) * scale_y, 1)] for px, py in outline]
         candidates.append({'id': uuid4().hex[:12], 'section_id': group['sections'][section_code-1]['id'],
-                           'polygon': polygon, 'status': 'pending', 'source': 'automatic',
+                           'polygon': polygon, 'status': 'pending', 'source': 'automatic', 'damage_type': None,
+                           'decision_source': None,
                            'length_mm': round(length_mm, 1), 'contrast': round(contrast, 1), 'score': score,
+                           'area_mm2': round(_polygon_area(polygon) / ppm ** 2, 2),
                            'bbox': [round(x*scale_x, 1), round(y*scale_y, 1), round(bw*scale_x, 1), round(bh*scale_y, 1)]})
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = candidates[:400]
     data = {'version': 1, 'created_at': datetime.now(timezone.utc).isoformat(), 'zone_created_at': zones['created_at'],
             'group_id': group_id, 'sensitivity': sensitivity, 'image_size_wh': zones['image_size_wh'],
+            'pixels_per_mm': ppm,
             'sections': [{'id': section['id'], 'name': section['name'], 'color': section['color']} for section in group['sections']],
             'candidates': candidates}
     return _write(result_dir, _summary(data))
 
 
-def review_crack(result_dir, candidate_id, status):
+def review_crack(result_dir, candidate_id, status, damage_type=None):
+    return review_cracks(result_dir, [candidate_id], status, damage_type)
+
+
+def review_cracks(result_dir, candidate_ids, status, damage_type=None, auto_larger=False):
     if status not in {'pending', 'accepted', 'excluded'}:
         raise ValueError('검토 상태가 올바르지 않습니다.')
+    if damage_type is not None and damage_type not in DAMAGE_TYPES:
+        raise ValueError('손상 유형이 올바르지 않습니다.')
+    if not isinstance(candidate_ids, list) or not candidate_ids or len(candidate_ids) > 400 or len(set(candidate_ids)) != len(candidate_ids):
+        raise ValueError('검토할 후보를 1~400개 선택해 주세요.')
+    if auto_larger and (status != 'accepted' or damage_type is None):
+        raise ValueError('크기 기준 자동 채택에는 손상 유형이 필요합니다.')
     data = load_cracks(result_dir)
     if not data:
         raise ValueError('먼저 크랙 후보를 생성해 주세요.')
-    candidate = next((item for item in data['candidates'] if item['id'] == candidate_id), None)
-    if not candidate:
+    by_id = {item['id']: item for item in data['candidates']}
+    if any(candidate_id not in by_id for candidate_id in candidate_ids):
         raise ValueError('크랙 후보를 찾을 수 없습니다.')
-    candidate['status'] = status
+    selected = [by_id[candidate_id] for candidate_id in candidate_ids]
+    threshold = min(item['area_mm2'] for item in selected)
+    if auto_larger and threshold <= 0:
+        raise ValueError('선택한 후보의 표시 면적이 없어 크기 기준 자동 채택을 적용할 수 없습니다.')
+    for candidate in selected:
+        candidate['status'] = status
+        if damage_type is not None:
+            candidate['damage_type'] = damage_type
+        candidate['decision_source'] = None if status == 'pending' else 'manual'
+    auto_count = 0
+    if auto_larger:
+        for candidate in data['candidates']:
+            if candidate['id'] in candidate_ids or candidate['source'] != 'automatic' or candidate['status'] != 'pending':
+                continue
+            if candidate['area_mm2'] >= threshold:
+                candidate['status'] = 'accepted'
+                candidate['damage_type'] = damage_type
+                candidate['decision_source'] = 'auto'
+                auto_count += 1
+    data['last_review'] = {'selected': len(selected), 'auto_accepted': auto_count}
     return _write(result_dir, _summary(data))
 
 
@@ -192,7 +246,9 @@ def add_manual_crack(result_dir, points):
     x, y, bw, bh = cv2.boundingRect(contour)
     candidate = {'id': uuid4().hex[:12], 'section_id': data['sections'][code-1]['id'],
                  'polygon': [[round(float(px)/sx, 1), round(float(py)/sy, 1)] for px, py in contour],
-                 'status': 'accepted', 'source': 'manual', 'length_mm': round(length_px / zones['nominal_pixels_per_mm'], 1),
+                 'status': 'accepted', 'source': 'manual', 'damage_type': None, 'decision_source': 'manual',
+                 'length_mm': round(length_px / zones['nominal_pixels_per_mm'], 1),
+                 'area_mm2': round(_polygon_area(contour) / (sx * sy * zones['nominal_pixels_per_mm'] ** 2), 2),
                  'contrast': 0., 'score': 1.,
                  'bbox': [round(x/sx, 1), round(y/sy, 1), round(bw/sx, 1), round(bh/sy, 1)]}
     data['candidates'].insert(0, candidate)

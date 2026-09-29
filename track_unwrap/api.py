@@ -18,7 +18,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, StrictInt
 
 from .zones import assist_polygon, build_zones, list_zone_instances, load_zones, suggest_half_turn
-from .cracks import add_manual_crack, delete_manual_crack, load_cracks, propose_cracks, review_crack
+from .cracks import add_manual_crack, delete_manual_crack, load_cracks, propose_cracks, review_crack, review_cracks
 from .pipeline import Settings, unwrap
 
 
@@ -255,6 +255,12 @@ class CrackProposal(BaseModel):
 
 class CrackReview(BaseModel):
     status: str
+    damage_type: str | None = None
+
+
+class CrackBatchReview(CrackReview):
+    candidate_ids: list[str]
+    auto_larger: bool = False
 
 
 class ManualCrack(BaseModel):
@@ -495,7 +501,22 @@ def review_job_crack(job_id: str, candidate_id: str, request: CrackReview):
             zones = load_zones(result_dir)
             if data and zones and data['zone_created_at'] != zones['created_at']:
                 raise ValueError('영역이 변경되었습니다. 크랙 후보를 다시 생성해 주세요.')
-            return {**review_crack(result_dir, candidate_id, request.status), 'ready': True, 'stale': False}
+            return {**review_crack(result_dir, candidate_id, request.status, request.damage_type), 'ready': True, 'stale': False}
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+
+@app.post('/api/jobs/{job_id}/cracks/review-batch')
+def review_job_cracks_batch(job_id: str, request: CrackBatchReview):
+    result_dir = _zones_dir(job_id)
+    with _zone_lock(job_id):
+        try:
+            data = load_cracks(result_dir)
+            zones = load_zones(result_dir)
+            if data and zones and data['zone_created_at'] != zones['created_at']:
+                raise ValueError('영역이 변경되었습니다. 크랙 후보를 다시 생성해 주세요.')
+            return {**review_cracks(result_dir, request.candidate_ids, request.status,
+                                    request.damage_type, request.auto_larger), 'ready': True, 'stale': False}
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 

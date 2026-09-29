@@ -22,8 +22,9 @@ type Props = {
   onSegmentSelect: (shapeId: string, placement: number) => void
   onSegmentMove: (shapeId: string, placement: number, offset: Point) => void
   crackCandidates?: CrackCandidate[]
-  selectedCrackId?: string | null
-  onCrackSelect?: (id: string) => void
+  selectedCrackIds?: string[]
+  onCrackSelect?: (id: string, shift: boolean) => void
+  onCrackMarquee?: (ids: string[], shift: boolean) => void
   hint?: string
   onAdd: (point: Point) => void
   onInsert: (index: number, point: Point) => void
@@ -38,7 +39,7 @@ type Props = {
 
 export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, closedShapes, selectedVertex, opacity,
   focusShape, suggestedPolygon, segmentInstances, adjustingSegments, selectedSegment, onSegmentSelect, onSegmentMove,
-  crackCandidates = [], selectedCrackId = null, onCrackSelect, hint,
+  crackCandidates = [], selectedCrackIds = [], onCrackSelect, onCrackMarquee, hint,
   onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete, onClose, onClosedMove, onClosedDelete }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<SVGSVGElement>(null)
@@ -54,6 +55,8 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
   const [ready, setReady] = useState(false)
   const [failed, setFailed] = useState(false)
   const [size, setSize] = useState({ width: 1, height: 1 })
+  const selectionStart = useRef<{ id: number; point: Point; candidateId: string | null; shift: boolean } | null>(null)
+  const [selectionEnd, setSelectionEnd] = useState<Point | null>(null)
   const [, render] = useState(0)
 
   useEffect(() => {
@@ -87,11 +90,12 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId])
 
-  useEffect(() => { viewer.current?.setMouseNavEnabled(!editing) }, [editing])
+  const selectingCracks = Boolean(onCrackMarquee) && !editing
+  useEffect(() => { viewer.current?.setMouseNavEnabled(!(editing || selectingCracks)) }, [editing, selectingCracks])
 
   useEffect(() => {
     const overlay = overlayRef.current
-    if (!editing || !ready || !overlay || !host.current) return
+    if (!(editing || selectingCracks) || !ready || !overlay || !host.current) return
     const wheelZoom = (event: WheelEvent) => {
       const instance = viewer.current
       const element = host.current
@@ -107,7 +111,44 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     }
     overlay.addEventListener('wheel', wheelZoom, { passive: false })
     return () => overlay.removeEventListener('wheel', wheelZoom)
-  }, [editing, ready])
+  }, [editing, selectingCracks, ready])
+
+  function overlayPoint(event: React.PointerEvent): Point {
+    const bounds = overlayRef.current!.getBoundingClientRect()
+    return [event.clientX - bounds.left, event.clientY - bounds.top]
+  }
+  function startCrackSelection(event: React.PointerEvent<SVGSVGElement>) {
+    if (!selectingCracks || event.button !== 0) return
+    const target = event.target as Element
+    const candidateId = target.closest('[data-crack-id]')?.getAttribute('data-crack-id') ?? null
+    selectionStart.current = { id: event.pointerId, point: overlayPoint(event), candidateId, shift: event.shiftKey }
+    setSelectionEnd(null)
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+  function moveCrackSelection(event: React.PointerEvent<SVGSVGElement>) {
+    if (selectionStart.current?.id !== event.pointerId) return
+    const end = overlayPoint(event)
+    if (Math.hypot(end[0] - selectionStart.current.point[0], end[1] - selectionStart.current.point[1]) > 4) setSelectionEnd(end)
+  }
+  function endCrackSelection(event: React.PointerEvent<SVGSVGElement>) {
+    const start = selectionStart.current
+    if (!start || start.id !== event.pointerId) return
+    const end = overlayPoint(event)
+    if (Math.hypot(end[0] - start.point[0], end[1] - start.point[1]) > 4) {
+      const bounds = [Math.min(start.point[0], end[0]), Math.min(start.point[1], end[1]),
+        Math.max(start.point[0], end[0]), Math.max(start.point[1], end[1])]
+      const ids = crackCandidates.filter(item => {
+        const [x, y, width, height] = item.bbox
+        const a = project([x, y]), b = project([x + width, y + height])
+        return a[0] <= bounds[2] && b[0] >= bounds[0] && a[1] <= bounds[3] && b[1] >= bounds[1]
+      }).map(item => item.id)
+      onCrackMarquee?.(ids, start.shift)
+    } else if (start.candidateId) onCrackSelect?.(start.candidateId, start.shift)
+    else if (!start.shift) onCrackMarquee?.([], false)
+    selectionStart.current = null
+    setSelectionEnd(null)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+  }
 
   useEffect(() => {
     if (!ready || !viewer.current || !focusShape?.polygon.length) return
@@ -229,7 +270,9 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     <div ref={host} className={styles.deepzoom} aria-label="확대 가능한 트랙 전개 사진" style={{ cursor: panning ? 'grabbing' : undefined }} />
     {failed && <div className={styles.canvasFailure}>확대 이미지를 불러오지 못했습니다.</div>}
     {ready && <svg ref={overlayRef} className={styles.overlay} width={size.width} height={size.height}
-      style={{ pointerEvents: editing ? 'auto' : 'none', cursor: panning ? 'grabbing' : editing ? 'crosshair' : 'default' }}
+      style={{ pointerEvents: editing || selectingCracks ? 'auto' : 'none', cursor: panning ? 'grabbing' : editing || selectingCracks ? 'crosshair' : 'default' }}
+      onPointerDown={startCrackSelection} onPointerMove={moveCrackSelection} onPointerUp={endCrackSelection}
+      onPointerCancel={() => { selectionStart.current = null; setSelectionEnd(null) }}
       onClick={event => { const point = unproject(event); if (editing && event.button === 0 && point) onAdd(point) }}>
       {groupId && <image href={`${zoneFileBase(jobId, groupId)}/overlay.png?v=${encodeURIComponent(analysis.created_at)}`}
         x={left[0]} y={left[1]} width={right[0]-left[0]} height={right[1]-left[1]}
@@ -257,12 +300,15 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
         const [x, y, width, height] = candidate.bbox
         const [cx, cy] = project([x + width/2, y + height/2])
         if (cx < -15 || cx > size.width + 15 || cy < -15 || cy > size.height + 15) return null
-        const selected = selectedCrackId === candidate.id
-        return <g key={candidate.id} style={{ pointerEvents: 'all', cursor: 'pointer' }} onClick={event => { event.stopPropagation(); onCrackSelect?.(candidate.id) }}>
-          {selected && <polygon points={polygon(candidate.polygon)} className={styles.crackOutline} />}
-          <circle cx={cx} cy={cy} r={selected ? 9 : 5} className={candidate.status === 'accepted' ? styles.crackAccepted : candidate.status === 'excluded' ? styles.crackExcluded : styles.crackPending} />
+        const selected = selectedCrackIds.includes(candidate.id)
+        return <g key={candidate.id} data-crack-id={candidate.id} style={{ cursor: selectingCracks ? 'crosshair' : 'pointer' }}>
+          <polygon points={polygon(candidate.polygon)} className={selected ? styles.crackAreaSelected : candidate.status === 'accepted' ? styles.crackAreaAccepted : candidate.status === 'excluded' ? styles.crackAreaExcluded : styles.crackAreaPending} />
         </g>
       })}
+      {selectionStart.current && selectionEnd && <rect x={Math.min(selectionStart.current.point[0], selectionEnd[0])}
+        y={Math.min(selectionStart.current.point[1], selectionEnd[1])}
+        width={Math.abs(selectionEnd[0] - selectionStart.current.point[0])}
+        height={Math.abs(selectionEnd[1] - selectionStart.current.point[1])} className={styles.crackMarquee} pointerEvents="none" />}
       {adjustingSegments && segmentInstances.map(instance => {
         const key = `${instance.shape_id}:${instance.placement}`
         const xs = instance.polygon.map(point => point[0]), ys = instance.polygon.map(point => point[1])

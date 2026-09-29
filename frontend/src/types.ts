@@ -133,6 +133,23 @@ export interface CrackCandidate {
   score: number
 }
 
+export interface CrackTraceRequest {
+  point: Point | null
+  candidate_id: string | null
+  damage_type: 'chunk' | 'tear' | 'chip_cut'
+  offset_mm: number
+  tolerance: number
+}
+
+export interface CrackTracePreview {
+  polygon: Point[]
+  bbox: [number, number, number, number]
+  area_mm2: number
+  damage_type: CrackTraceRequest['damage_type']
+  candidate_id: string | null
+  seed: Point
+}
+
 export interface CrackReview {
   ready: boolean
   stale: boolean

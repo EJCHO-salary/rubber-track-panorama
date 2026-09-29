@@ -1,4 +1,4 @@
-import type { CrackReview, HalfTurnResult, Job, JobList, Point, SampleList, ZoneAnalysis, ZoneAssistResult, ZoneGroup, ZoneInstances, ZoneShape } from './types'
+import type { CrackReview, CrackTracePreview, CrackTraceRequest, HalfTurnResult, Job, JobList, Point, SampleList, ZoneAnalysis, ZoneAssistResult, ZoneGroup, ZoneInstances, ZoneShape } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, options)
@@ -34,6 +34,12 @@ export const api = {
   clearCracks: (id: string) => request<CrackReview>(`/api/jobs/${id}/cracks`, { method: 'DELETE' }),
   proposeCracks: (id: string, group_id: string, sensitivity: 'low' | 'normal' | 'high') => request<CrackReview>(`/api/jobs/${id}/cracks/propose`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id, sensitivity }),
+  }),
+  previewCrackTrace: (id: string, trace: CrackTraceRequest) => request<CrackTracePreview>(`/api/jobs/${id}/cracks/trace`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(trace),
+  }),
+  applyCrackTrace: (id: string, trace: CrackTraceRequest) => request<CrackReview>(`/api/jobs/${id}/cracks/trace/apply`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(trace),
   }),
   reviewCrack: (id: string, candidateId: string, status: 'pending' | 'accepted' | 'excluded') => request<CrackReview>(`/api/jobs/${id}/cracks/${candidateId}`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }),

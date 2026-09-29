@@ -25,6 +25,9 @@ type Props = {
   selectedCrackIds?: string[]
   onCrackSelect?: (id: string, shift: boolean) => void
   onCrackMarquee?: (ids: string[], shift: boolean) => void
+  tracePicking?: boolean
+  tracePolygon?: Point[] | null
+  onCrackSeed?: (point: Point, candidateId: string | null) => void
   hint?: string
   onAdd: (point: Point) => void
   onInsert: (index: number, point: Point) => void
@@ -39,7 +42,8 @@ type Props = {
 
 export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, closedShapes, selectedVertex, opacity,
   focusShape, suggestedPolygon, segmentInstances, adjustingSegments, selectedSegment, onSegmentSelect, onSegmentMove,
-  crackCandidates = [], selectedCrackIds = [], onCrackSelect, onCrackMarquee, hint,
+  crackCandidates = [], selectedCrackIds = [], onCrackSelect, onCrackMarquee,
+  tracePicking = false, tracePolygon, onCrackSeed, hint,
   onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete, onClose, onClosedMove, onClosedDelete }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<SVGSVGElement>(null)
@@ -134,7 +138,12 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     const start = selectionStart.current
     if (!start || start.id !== event.pointerId) return
     const end = overlayPoint(event)
-    if (Math.hypot(end[0] - start.point[0], end[1] - start.point[1]) > 4) {
+    if (tracePicking) {
+      if (Math.hypot(end[0] - start.point[0], end[1] - start.point[1]) <= 4) {
+        const point = unproject(event)
+        if (point) onCrackSeed?.(point, start.candidateId)
+      }
+    } else if (Math.hypot(end[0] - start.point[0], end[1] - start.point[1]) > 4) {
       const bounds = [Math.min(start.point[0], end[0]), Math.min(start.point[1], end[1]),
         Math.max(start.point[0], end[0]), Math.max(start.point[1], end[1])]
       const ids = crackCandidates.filter(item => {
@@ -305,6 +314,7 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
           <polygon points={polygon(candidate.polygon)} className={selected ? styles.crackAreaSelected : candidate.status === 'accepted' ? styles.crackAreaAccepted : candidate.status === 'excluded' ? styles.crackAreaExcluded : styles.crackAreaPending} />
         </g>
       })}
+      {tracePolygon && <polygon points={polygon(tracePolygon)} className={styles.crackTracePreview} pointerEvents="none" />}
       {selectionStart.current && selectionEnd && <rect x={Math.min(selectionStart.current.point[0], selectionEnd[0])}
         y={Math.min(selectionStart.current.point[1], selectionEnd[1])}
         width={Math.abs(selectionEnd[0] - selectionStart.current.point[0])}

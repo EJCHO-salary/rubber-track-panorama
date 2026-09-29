@@ -330,15 +330,175 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = candidates[:400]
     if previous and previous.get('group_id') == group_id and previous.get('zone_created_at') == zones['created_at']:
-        reviewed = [item for item in previous['candidates'] if item['status'] != 'pending'
-                    and _inside_authored(item, authored, scale_x, scale_y)]
-        candidates = reviewed + [item for item in candidates
-                                 if not any(_same_damage_location(item, saved) for saved in reviewed)]
+        preserved = [item for item in previous['candidates']
+                     if (item['status'] != 'pending' or item.get('selection_source') == 'guided')
+                     and (item.get('selection_source') == 'guided'
+                          or _inside_authored(item, authored, scale_x, scale_y))]
+        candidates = preserved + [item for item in candidates
+                                  if not any(_same_damage_location(item, saved) for saved in preserved)]
     data = {'version': 1, 'created_at': datetime.now(timezone.utc).isoformat(), 'zone_created_at': zones['created_at'],
             'group_id': group_id, 'sensitivity': sensitivity, 'image_size_wh': zones['image_size_wh'],
             'pixels_per_mm': ppm,
             'sections': [{'id': section['id'], 'name': section['name'], 'color': section['color']} for section in group['sections']],
             'candidates': candidates}
+    return _write(result_dir, _summary(data))
+
+
+def _trace_dark_component(gray, valid, seed, tolerance, offset_px):
+    """Select one near-black connected region, then add a measured outline offset."""
+    if not 15 <= tolerance <= 100:
+        raise ValueError('색상 허용 범위는 15~100이어야 합니다.')
+    if gray.shape != valid.shape:
+        raise ValueError('사진과 지정 영역 크기가 일치하지 않습니다.')
+    sx, sy = seed
+    if not (0 <= sx < gray.shape[1] and 0 <= sy < gray.shape[0] and valid[sy, sx]):
+        raise ValueError('지정된 영역의 검은 균열을 클릭해 주세요.')
+    smooth = cv2.GaussianBlur(gray, (3, 3), .7)
+    background = cv2.GaussianBlur(smooth, (0, 0), 12)
+    contrast = background.astype(np.int16) - smooth.astype(np.int16)
+    radius = 18
+    x0, y0 = max(0, sx-radius), max(0, sy-radius)
+    x1, y1 = min(gray.shape[1], sx+radius+1), min(gray.shape[0], sy+radius+1)
+    nearby = valid[y0:y1, x0:x1].astype(bool)
+    near_core = nearby & (smooth[y0:y1, x0:x1] <= 72) & (contrast[y0:y1, x0:x1] >= 17)
+    if not np.any(near_core):
+        raise ValueError('클릭한 곳 가까이에 연속된 검은 핵심부가 없습니다. 더 어두운 지점을 클릭해 주세요.')
+    yy, xx = np.nonzero(near_core)
+    distances = (xx + x0 - sx) ** 2 + (yy + y0 - sy) ** 2
+    closest = int(np.argmin(distances))
+    sx, sy = int(xx[closest] + x0), int(yy[closest] + y0)
+    if distances[closest] > 18 ** 2:
+        raise ValueError('검은 핵심부 가까이를 클릭해 주세요.')
+    limit = min(125, max(72, int(smooth[sy, sx]) + tolerance))
+    possible = np.uint8((smooth <= limit) & (contrast >= 11) & (valid > 0))
+    # A short interruption from glare or compression should not split one tear.
+    bridge = 3 if tolerance < 35 else 5 if tolerance < 70 else 7
+    possible = cv2.morphologyEx(possible, cv2.MORPH_CLOSE,
+                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (bridge, bridge)))
+    possible[valid == 0] = 0
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(possible, 8)
+    label = int(labels[sy, sx])
+    if not 0 < label < count:
+        raise ValueError('검은 영역을 연결할 수 없습니다. 허용 범위를 조정해 주세요.')
+    x, y, width, height, pixels = map(int, stats[label])
+    if pixels < 12:
+        raise ValueError('검은 연결 영역이 너무 작습니다. 다른 지점을 클릭해 주세요.')
+    if pixels > gray.size * .18:
+        raise ValueError('선택이 주변 그림자까지 번졌습니다. 허용 범위를 낮춰 주세요.')
+    selected = np.uint8(labels == label)
+    if offset_px:
+        radius = max(1, int(round(offset_px)))
+        selected = cv2.dilate(selected, cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (radius*2+1, radius*2+1)))
+        selected[valid == 0] = 0
+    contours, _ = cv2.findContours(selected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        raise ValueError('선택 경계를 만들 수 없습니다.')
+    contour = cv2.approxPolyDP(max(contours, key=cv2.contourArea), 1., True).reshape(-1, 2)
+    if len(contour) < 3:
+        raise ValueError('선택 경계를 만들 수 없습니다.')
+    return contour, selected, (sx, sy)
+
+
+def trace_crack(result_dir, point, damage_type, offset_mm, tolerance=55, candidate_id=None, apply=False):
+    """Preview or persist a Photoshop-like seeded crack selection."""
+    if damage_type not in DAMAGE_TYPES:
+        raise ValueError('손상 유형이 올바르지 않습니다.')
+    if not np.isfinite(offset_mm) or not 0 <= offset_mm <= 5:
+        raise ValueError('경계 여유는 0~5 mm로 지정해 주세요.')
+    data, zones = load_cracks(result_dir), load_zones(result_dir)
+    if not data or not zones or data['zone_created_at'] != zones['created_at']:
+        raise ValueError('현재 영역에서 크랙 후보를 먼저 생성해 주세요.')
+    candidate = next((item for item in data['candidates'] if item['id'] == candidate_id), None) if candidate_id else None
+    if candidate_id and not candidate:
+        raise ValueError('선택한 후보를 찾을 수 없습니다.')
+    root = Path(result_dir)
+    original = cv2.imread(str(root / 'panorama.png'), cv2.IMREAD_GRAYSCALE)
+    authored = cv2.imread(str(root / 'zones' / f"group_{data['group_id']}_authored.png"), cv2.IMREAD_GRAYSCALE)
+    sections = cv2.imread(str(root / 'zones' / f"group_{data['group_id']}_mask.png"), cv2.IMREAD_GRAYSCALE)
+    if original is None or authored is None or sections is None:
+        raise ValueError('전개 사진 또는 지정 영역을 읽을 수 없습니다.')
+    image_h, image_w = original.shape
+    if point is not None:
+        if len(point) != 2 or not all(np.isfinite(value) for value in point):
+            raise ValueError('선택 위치를 확인해 주세요.')
+        center_x, center_y = map(float, point)
+    elif candidate:
+        bx, by, bw, bh = candidate['bbox']
+        center_x, center_y = bx + bw/2, by + bh/2
+    else:
+        raise ValueError('사진에서 검은 균열을 클릭해 주세요.')
+    if not (0 <= center_x < image_w and 0 <= center_y < image_h):
+        raise ValueError('선택 위치가 사진 밖입니다.')
+    ppm = float(zones['nominal_pixels_per_mm'])
+    reach = round(ppm * 95)
+    left, top = max(0, round(center_x)-reach), max(0, round(center_y)-reach)
+    right, bottom = min(image_w, round(center_x)+reach+1), min(image_h, round(center_y)+reach+1)
+    if candidate:
+        bx, by, bw, bh = candidate['bbox']
+        margin = round(ppm * 15)
+        left, top = max(0, min(left, int(bx)-margin)), max(0, min(top, int(by)-margin))
+        right = min(image_w, max(right, int(bx+bw)+margin))
+        bottom = min(image_h, max(bottom, int(by+bh)+margin))
+    gray = original[top:bottom, left:right]
+    valid = cv2.resize(authored, (image_w, image_h), interpolation=cv2.INTER_NEAREST)[top:bottom, left:right]
+    # The seed guides a local selection. A dark lug edge must not flood across
+    # several pitches just because its shadow touches the chosen fissure.
+    growth = np.zeros(gray.shape, np.uint8)
+    if candidate:
+        bx, by, bw, bh = candidate['bbox']
+        allowance = round(ppm * (20 if damage_type == 'tear' else 8))
+        gx0, gy0 = max(0, int(bx)-allowance-left), max(0, int(by)-allowance-top)
+        gx1, gy1 = min(gray.shape[1], int(bx+bw)+allowance-left), min(gray.shape[0], int(by+bh)+allowance-top)
+    else:
+        allowance = round(ppm * (60 if damage_type == 'tear' else 25))
+        gx0, gy0 = max(0, round(center_x)-allowance-left), max(0, round(center_y)-allowance-top)
+        gx1, gy1 = min(gray.shape[1], round(center_x)+allowance-left+1), min(gray.shape[0], round(center_y)+allowance-top+1)
+    growth[gy0:gy1, gx0:gx1] = 1
+    valid = np.uint8((valid > 0) & (growth > 0))
+    if candidate and point is None:
+        polygon = np.rint(np.asarray(candidate['polygon']) - [left, top]).astype(np.int32)
+        footprint = np.zeros(gray.shape, np.uint8)
+        cv2.fillPoly(footprint, [polygon], 1)
+        admissible = (footprint > 0) & (valid > 0)
+        if not np.any(admissible):
+            raise ValueError('후보가 지정된 영역 안에 있지 않습니다.')
+        local = np.where(admissible, gray, 255)
+        sy, sx = np.unravel_index(int(np.argmin(local)), local.shape)
+    else:
+        sx, sy = round(center_x)-left, round(center_y)-top
+    contour, selected, seed = _trace_dark_component(gray, valid, (sx, sy), int(tolerance), round(offset_mm*ppm))
+    contour = contour + [left, top]
+    polygon = [[float(x), float(y)] for x, y in contour]
+    # A contour can bridge a hole in the authored mask; never silently fill it.
+    mask_outline = np.zeros(gray.shape, np.uint8)
+    cv2.fillPoly(mask_outline, [contour - [left, top]], 1)
+    invalid_count = int(np.count_nonzero((mask_outline > 0) & (valid == 0)))
+    if invalid_count > min(20, max(3, round(np.count_nonzero(mask_outline) * .01))):
+        raise ValueError('선택 경계가 지정되지 않은 영역을 가로지릅니다. 허용 범위나 여유를 줄여 주세요.')
+    area_mm2 = round(_polygon_area(polygon) / ppm ** 2, 2)
+    bx, by, bw, bh = cv2.boundingRect(contour.astype(np.int32))
+    if damage_type == 'tear' and area_mm2 / max(bw, bh) * ppm > 3.5:
+        raise ValueError('티어 선택이 주변 그림자까지 넓어졌습니다. 색상 허용 범위를 낮춰 주세요.')
+    section_crop = cv2.resize(sections, (image_w, image_h), interpolation=cv2.INTER_NEAREST)[top:bottom, left:right]
+    codes = section_crop[selected > 0]
+    code = int(np.bincount(codes, minlength=len(data['sections'])+1)[1:].argmax() + 1)
+    result = {'polygon': polygon, 'bbox': [float(bx), float(by), float(bw), float(bh)],
+              'area_mm2': area_mm2, 'damage_type': damage_type, 'candidate_id': candidate_id,
+              'seed': [float(seed[0]+left), float(seed[1]+top)]}
+    if not apply:
+        return result
+    if candidate is None:
+        candidate = {'id': uuid4().hex[:12], 'status': 'pending', 'source': 'manual', 'damage_type': None,
+                     'decision_source': None, 'score': 1., 'contrast': 0.}
+        data['candidates'].insert(0, candidate)
+    candidate.update({'section_id': data['sections'][code-1]['id'], 'polygon': polygon,
+                      'bbox': result['bbox'], 'area_mm2': area_mm2,
+                      'length_mm': round(max(bw, bh) / ppm, 1),
+                      'suggested_damage_type': damage_type,
+                      'suggestion_reason': '검은 연결 영역을 선택하고 경계 여유를 적용했습니다.',
+                      'selection_source': 'guided', 'selection_offset_mm': offset_mm,
+                      'selection_tolerance': tolerance})
     return _write(result_dir, _summary(data))
 
 

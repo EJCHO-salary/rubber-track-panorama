@@ -1,9 +1,9 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Check, PenLine, RotateCcw, ScanSearch, Trash2, X } from 'lucide-react'
 import { Link, useParams } from 'react-router'
 import { api, formatNumber } from '../api'
-import type { CrackCandidate, CrackReview, Point } from '../types'
+import type { CrackCandidate, CrackReview, CrackTraceRequest, Point } from '../types'
 import ZoneCanvas from '../components/ZoneCanvas'
 import styles from './CrackWorkspace.module.css'
 
@@ -30,12 +30,34 @@ export default function CrackWorkspace() {
   const [drawing, setDrawing] = useState(false)
   const [manualPoints, setManualPoints] = useState<Point[]>([])
   const [error, setError] = useState('')
+  const [tracePicking, setTracePicking] = useState(false)
+  const [tracePoint, setTracePoint] = useState<Point | null>(null)
+  const [traceCandidateId, setTraceCandidateId] = useState<string | null>(null)
+  const [traceType, setTraceType] = useState<DamageType>('tear')
+  const [traceOffset, setTraceOffset] = useState(.4)
+  const [traceTolerance, setTraceTolerance] = useState(30)
+  const traceRequest: CrackTraceRequest = { point: tracePoint, candidate_id: traceCandidateId,
+    damage_type: traceType, offset_mm: traceOffset, tolerance: traceTolerance }
+  const [queuedTrace, setQueuedTrace] = useState<CrackTraceRequest | null>(null)
+  useEffect(() => {
+    if (!tracePoint && !traceCandidateId) { setQueuedTrace(null); return }
+    const timer = window.setTimeout(() => setQueuedTrace({ ...traceRequest }), 250)
+    return () => window.clearTimeout(timer)
+    // Primitive inputs alone control the request; the object is recreated per render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tracePoint?.[0], tracePoint?.[1], traceCandidateId, traceType, traceOffset, traceTolerance])
+  const currentPreview = Boolean(queuedTrace && queuedTrace.candidate_id === traceCandidateId &&
+    queuedTrace.point?.[0] === tracePoint?.[0] && queuedTrace.point?.[1] === tracePoint?.[1] &&
+    queuedTrace.damage_type === traceType && queuedTrace.offset_mm === traceOffset && queuedTrace.tolerance === traceTolerance)
+  const tracePreview = useQuery({ queryKey: ['crack-trace', id, queuedTrace],
+    queryFn: () => api.previewCrackTrace(id, queuedTrace!),
+    enabled: Boolean(review.data?.ready && !review.data?.stale && queuedTrace), retry: false })
   const proposal = useMutation({ mutationFn: () => api.proposeCracks(id, groupId, sensitivity),
-    onSuccess: (data: CrackReview) => { queryClient.setQueryData(['cracks', id], data); setSelectedIds([]); setError('') },
+    onSuccess: (data: CrackReview) => { queryClient.setQueryData(['cracks', id], data); setSelectedIds([]); setTracePoint(null); setTraceCandidateId(null); setError('') },
     onError: (cause: Error) => setError(cause.message) })
   const clear = useMutation({ mutationFn: () => api.clearCracks(id),
     onSuccess: (data: CrackReview) => { queryClient.setQueryData(['cracks', id], data); setSelectedIds([]); setDamageType(null);
-      setFocus(null); setDrawing(false); setManualPoints([]); setSectionId('all'); setStatus('all');
+      setFocus(null); setDrawing(false); setManualPoints([]); setTracePoint(null); setTraceCandidateId(null); setTracePicking(false); setSectionId('all'); setStatus('all');
       setError(''); setNotice('크랙 후보와 판정 기록을 모두 삭제했습니다. 새 후보 찾기를 눌러 다시 추출하세요.') },
     onError: (cause: Error) => setError(cause.message) })
   const decision = useMutation({ mutationFn: ({ ids, next, type, auto }: { ids: string[]; next: 'pending' | 'accepted' | 'excluded'; type?: DamageType; auto: boolean }) => api.reviewCracks(id, ids, next, type, auto),
@@ -48,6 +70,12 @@ export default function CrackWorkspace() {
   const removeManual = useMutation({ mutationFn: (candidateId: string) => api.deleteManualCrack(id, candidateId),
     onSuccess: (data: CrackReview) => { queryClient.setQueryData(['cracks', id], data); setSelectedIds([]); setError('') },
     onError: (cause: Error) => setError(cause.message) })
+  const applyTrace = useMutation({ mutationFn: (request: CrackTraceRequest) => api.applyCrackTrace(id, request),
+    onSuccess: (updated: CrackReview) => { queryClient.setQueryData(['cracks', id], updated)
+      setSelectedIds(traceCandidateId ? [traceCandidateId] : updated.candidates?.[0] ? [updated.candidates[0].id] : [])
+      setDamageType(traceType); setTracePoint(null); setTraceCandidateId(null); setTracePicking(false)
+      setError(''); setNotice('선택 경계를 적용했습니다. 손상 유형과 채택 여부를 확인해 주세요.') },
+    onError: (cause: Error) => setError(cause.message) })
   const data = review.data
   const candidates = data?.candidates ?? []
   const selectedCandidates = candidates.filter(item => selectedIds.includes(item.id))
@@ -58,6 +86,7 @@ export default function CrackWorkspace() {
   function choose(candidateId: string, zoom: boolean, shift = false) {
     const candidate = candidates.find(item => item.id === candidateId)
     if (!candidate) return
+    setTracePoint(null); setTraceCandidateId(null); setTracePicking(false)
     setSelectedIds(items => items.includes(candidateId) ? items.filter(item => item !== candidateId) : shift ? [...items, candidateId] : [candidateId])
     setDamageType(shift ? null : candidate.damage_type ?? candidate.suggested_damage_type ?? null)
     if (zoom) {
@@ -66,6 +95,7 @@ export default function CrackWorkspace() {
     }
   }
   function selectMarquee(ids: string[], shift: boolean) {
+    setTracePoint(null); setTraceCandidateId(null); setTracePicking(false)
     setSelectedIds(current => {
       if (shift) return [...current.filter(id => !ids.includes(id)), ...ids.filter(id => !current.includes(id))]
       return ids.length && ids.every(id => current.includes(id)) ? current.filter(id => !ids.includes(id)) : ids
@@ -79,6 +109,21 @@ export default function CrackWorkspace() {
   }
   function clearAll() {
     if (window.confirm('이 작업의 크랙 후보, 채택·제외 판정, 수동 표시를 모두 삭제할까요? 영역 지정과 원본 사진은 유지됩니다.')) clear.mutate()
+  }
+  function prepareTrace(candidate: CrackCandidate) {
+    const mode = candidate.damage_type ?? candidate.suggested_damage_type ?? 'tear'
+    setTraceType(mode); setTraceOffset(mode === 'tear' ? .4 : mode === 'chip_cut' ? 1.5 : 2.5)
+    setTraceTolerance(30); setTracePoint(null); setTraceCandidateId(candidate.id); setTracePicking(false)
+    setSelectedIds([candidate.id])
+  }
+  function chooseTraceSeed(point: Point, candidateId: string | null) {
+    const candidate = candidates.find(item => item.id === candidateId)
+    if (candidate) {
+      const mode = candidate.damage_type ?? candidate.suggested_damage_type ?? 'tear'
+      setTraceType(mode); setTraceOffset(mode === 'tear' ? .4 : mode === 'chip_cut' ? 1.5 : 2.5)
+      setSelectedIds([candidate.id])
+    } else setSelectedIds([])
+    setTracePoint(point); setTraceCandidateId(candidateId)
   }
   if (zones.isLoading || review.isLoading) return <div className={styles.loading}>크랙 검토 화면을 준비하고 있습니다…</div>
   if (!zones.data || !data) return <div className={styles.loading}>검토 데이터를 불러오지 못했습니다.</div>
@@ -99,7 +144,10 @@ export default function CrackWorkspace() {
         onDelete={index => setManualPoints(items => items.filter((_, i) => i !== index))}
         onClose={noop} onClosedMove={noop} onClosedDelete={noop} crackCandidates={drawing ? [] : filtered} selectedCrackIds={selectedIds}
         onCrackSelect={(candidateId, shift) => choose(candidateId, false, shift)} onCrackMarquee={drawing ? undefined : selectMarquee}
-        hint={drawing ? '사진을 따라 점을 찍어 균열 경로를 그리세요 · 휠 확대 · 휠 버튼으로 이동' : '드래그 선택 · Shift+드래그 추가 · 다시 선택하여 해제 · 휠 확대 · 휠 버튼 이동'} />
+        tracePicking={tracePicking} tracePolygon={currentPreview ? tracePreview.data?.polygon : null} onCrackSeed={chooseTraceSeed}
+        hint={drawing ? '사진을 따라 점을 찍어 균열 경로를 그리세요 · 휠 확대 · 휠 버튼으로 이동' : tracePicking
+          ? '검은 균열을 클릭해 선택 초안을 만드세요 · 휠 확대 · 휠 버튼 이동'
+          : '드래그 선택 · Shift+드래그 추가 · 다시 선택하여 해제 · 휠 확대 · 휠 버튼 이동'} />
       <div className={styles.legend}><span><i className={styles.pendingDot} /> 미검토 영역</span><span><i className={styles.acceptedDot} /> 채택 영역</span><span><i className={styles.excludedDot} /> 제외 영역</span><span><i className={styles.selectionDot} /> 현재 선택</span></div>
     </section><aside className={styles.sidePanel}>
       <div className={styles.setup}><strong>후보 탐색</strong><p>사용자가 지정한 도형 안에서만 연속된 거의 검은 핵심부를 찾고, 분필 자국 주변과 반복 형상 경계를 억제합니다. 지정되지 않은 빈 영역은 탐색하지 않습니다.</p>
@@ -112,7 +160,23 @@ export default function CrackWorkspace() {
         {data.ready && !data.stale && <div className={styles.manualTool}><strong>놓친 균열 직접 표시</strong>
           {drawing ? <><p>사진을 따라 2개 이상의 점을 찍으세요. 점을 끌어 경로를 조정할 수 있습니다.</p><div><button onClick={() => { setDrawing(false); setManualPoints([]) }} disabled={manual.isPending}>취소</button>
             <button onClick={() => manual.mutate()} disabled={manualPoints.length < 2 || manual.isPending}><Check size={14} /> {manual.isPending ? '저장 중…' : `경로 저장 (${manualPoints.length}점)`}</button></div></>
-            : <button onClick={() => { setDrawing(true); setManualPoints([]) }}><PenLine size={15} /> 수동 균열 그리기</button>}</div>}
+            : <button onClick={() => { setDrawing(true); setTracePicking(false); setTracePoint(null); setTraceCandidateId(null); setManualPoints([]) }}><PenLine size={15} /> 수동 균열 그리기</button>}</div>}
+        {data.ready && !data.stale && <div className={styles.traceTool}><strong>검은 연결 영역 선택</strong>
+          <p>누락된 균열을 사진에서 클릭하거나 후보를 선택한 뒤 경계를 다듬으세요. 파란 윤곽은 적용 전 미리보기입니다.</p>
+          <button className={tracePicking ? styles.tracePickActive : styles.tracePick} onClick={() => { setTracePicking(value => !value); setTracePoint(null); setTraceCandidateId(null); setDrawing(false); setManualPoints([]) }}>
+            <ScanSearch size={14} /> {tracePicking ? '사진 클릭 모드 종료' : '사진에서 검은 영역 클릭'}</button>
+          {(tracePoint || traceCandidateId) && <div className={styles.traceControls}>
+            <label>선택 형태<select value={traceType} onChange={event => { const mode = event.target.value as DamageType; setTraceType(mode); setTraceOffset(mode === 'tear' ? .4 : mode === 'chip_cut' ? 1.5 : 2.5) }}>
+              {damageTypes.map(type => <option key={type.id} value={type.id}>{type.label}</option>)}</select></label>
+            <label>색상 허용 범위 <strong>{traceTolerance}</strong><input type="range" min="15" max="100" step="5" value={traceTolerance} onChange={event => setTraceTolerance(Number(event.target.value))} /></label>
+            <label>경계 여유 <strong>{traceOffset.toFixed(1)} mm</strong><input type="range" min="0" max="5" step="0.1" value={traceOffset} onChange={event => setTraceOffset(Number(event.target.value))} /></label>
+            {(!currentPreview || tracePreview.isFetching) && <small>사진에서 경계를 계산하고 있습니다…</small>}
+            {currentPreview && tracePreview.isError && <small className={styles.traceError}>{(tracePreview.error as Error).message}</small>}
+            {currentPreview && tracePreview.data && !tracePreview.isFetching && <><small>미리보기 면적 {tracePreview.data.area_mm2.toFixed(1)} mm² · {traceCandidateId ? '기존 후보 수정' : '새 후보 추가'}</small>
+              <button disabled={applyTrace.isPending} onClick={() => applyTrace.mutate(traceRequest)}><Check size={14} /> {applyTrace.isPending ? '적용 중…' : '이 경계 적용'}</button></>}
+            <button className={styles.traceCancel} onClick={() => { setTracePoint(null); setTraceCandidateId(null); setTracePicking(false) }}>미리보기 취소</button>
+          </div>}
+        </div>}
       </div>
       {data.ready && <><div className={styles.stats}><div><strong>{formatNumber(data.totals?.proposed ?? 0)}</strong><small>미검토</small></div><div><strong>{formatNumber(data.totals?.accepted ?? 0)}</strong><small>채택</small></div><div><strong>{formatNumber(data.totals?.excluded ?? 0)}</strong><small>제외</small></div></div>
         <div className={styles.sectionCounts}><strong>영역별 집계</strong>{data.sections?.map(section => <div key={section.id}><span><i style={{ background: section.color }} />{section.name}</span><small>후보 {data.summary?.[section.id]?.proposed ?? 0} · 채택 {data.summary?.[section.id]?.accepted ?? 0}</small></div>)}</div>
@@ -121,6 +185,7 @@ export default function CrackWorkspace() {
             ? `영상 초안 · ${selected.suggestion_reason} 채택 전 확인해 주세요.`
             : '손상 유형을 지정한 후 선택한 후보를 함께 판정하세요.'}</p>
           <div className={styles.damageTypes}>{damageTypes.map(type => <button key={type.id} type="button" className={damageType === type.id ? styles.damageActive : ''} onClick={() => setDamageType(type.id)}>{type.label}</button>)}</div>
+          {selected && <button className={styles.refineButton} onClick={() => prepareTrace(selected)}><ScanSearch size={14} /> 선택 경계 다듬기</button>}
           <label className={styles.autoOption}><input type="checkbox" checked={autoLarger} disabled={threshold <= 0} onChange={event => setAutoLarger(event.target.checked)} /> 같은 면적 이상인 미검토 자동 후보도 채택 <strong>{threshold > 0 ? autoCount : 0}개</strong></label>
           <small className={styles.autoHint}>이미 제외했거나 직접 판정한 후보는 자동으로 바꾸지 않습니다.</small>
           <div className={styles.decisions}>

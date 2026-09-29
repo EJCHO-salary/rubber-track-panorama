@@ -18,7 +18,9 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, StrictInt
 
 from .zones import assist_polygon, build_zones, list_zone_instances, load_zones, suggest_half_turn
-from .cracks import add_manual_crack, clear_cracks, delete_manual_crack, load_cracks, propose_cracks, review_crack, review_cracks
+from .cracks import (add_manual_crack, clear_cracks, delete_manual_crack,
+                     load_cracks, propose_cracks, review_crack, review_cracks,
+                     trace_crack)
 from .pipeline import Settings, unwrap
 
 
@@ -267,6 +269,14 @@ class ManualCrack(BaseModel):
     points: list[list[float]]
 
 
+class GuidedCrackSelection(BaseModel):
+    point: list[float] | None = None
+    candidate_id: str | None = None
+    damage_type: str
+    offset_mm: float = Field(ge=0, le=5)
+    tolerance: int = Field(ge=15, le=100)
+
+
 @app.post('/api/jobs', status_code=202)
 async def create_job(width_mm: float = Form(...), pitch_mm: float = Form(...),
                      total_links: str | None = Form(None), images: list[UploadFile] = File(...)):
@@ -496,6 +506,29 @@ def propose_job_cracks(job_id: str, request: CrackProposal):
     with _zone_lock(job_id):
         try:
             return {**propose_cracks(result_dir, request.group_id, request.sensitivity), 'ready': True, 'stale': False}
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+
+@app.post('/api/jobs/{job_id}/cracks/trace')
+def preview_crack_trace(job_id: str, request: GuidedCrackSelection):
+    result_dir = _zones_dir(job_id)
+    with _zone_lock(job_id):
+        try:
+            return trace_crack(result_dir, request.point, request.damage_type,
+                               request.offset_mm, request.tolerance, request.candidate_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+
+@app.post('/api/jobs/{job_id}/cracks/trace/apply')
+def apply_crack_trace(job_id: str, request: GuidedCrackSelection):
+    result_dir = _zones_dir(job_id)
+    with _zone_lock(job_id):
+        try:
+            return {**trace_crack(result_dir, request.point, request.damage_type,
+                                  request.offset_mm, request.tolerance, request.candidate_id, apply=True),
+                    'ready': True, 'stale': False}
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 

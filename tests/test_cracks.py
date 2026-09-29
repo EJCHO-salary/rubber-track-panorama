@@ -7,9 +7,10 @@ from fastapi.testclient import TestClient
 
 from track_unwrap import api
 from track_unwrap.cracks import (_dark_fissure_mask, _repeated_structure_support,
+                                 _trace_dark_component,
                                  _suggest_damage_type, add_manual_crack,
                                  delete_manual_crack, load_cracks, propose_cracks,
-                                 review_crack, review_cracks)
+                                 review_crack, review_cracks, trace_crack)
 from track_unwrap.zones import build_zones
 
 
@@ -117,6 +118,71 @@ def test_damage_type_hint_requires_geometry_and_exposed_edge():
     assert _suggest_damage_type(30, 12, 2, .3)[0] == 'chip_cut'
     assert _suggest_damage_type(120, 13, 1.5, .4)[0] == 'chunk'
     assert _suggest_damage_type(120, 13, 1.5, .05)[0] is None
+
+
+def test_guided_selection_bridges_short_gap_without_neighbor_and_offsets_outline():
+    gray = np.full((150, 300), 160, np.uint8)
+    cv2.line(gray, (35, 70), (140, 70), 18, 3)
+    cv2.line(gray, (147, 70), (250, 70), 18, 3)
+    cv2.line(gray, (35, 105), (250, 105), 18, 3)
+    valid = np.ones_like(gray)
+    contour, selected, _ = _trace_dark_component(gray, valid, (70, 70), 55, 0)
+    x, y, width, height = cv2.boundingRect(contour)
+    assert x <= 35 and x + width >= 250
+    assert y < 70 < y + height and y + height < 95
+    assert not selected[105, 70]
+    expanded, _, _ = _trace_dark_component(gray, valid, (70, 70), 55, 4)
+    assert cv2.contourArea(expanded) > cv2.contourArea(contour)
+
+
+def test_guided_preview_is_read_only_and_apply_adds_reviewable_candidate(tmp_path, monkeypatch):
+    image = np.full((200, 400, 3), 155, np.uint8)
+    cv2.line(image, (80, 70), (200, 70), (15, 15, 15), 3)
+    cv2.imwrite(str(tmp_path / 'panorama.png'), image)
+    (tmp_path / 'quality_report.json').write_text(json.dumps({
+        'settings': {'width_mm': 80, 'pitch_mm': 20, 'pixels_per_mm': 5},
+    }), encoding='utf-8')
+    _test_zones(tmp_path, [[0, 0], [399, 0], [399, 199], [0, 199]])
+    original = propose_cracks(tmp_path, 'geometry', 'high')
+    count = len(original['candidates'])
+    monkeypatch.setattr(api, '_zones_dir', lambda _: tmp_path)
+    request = {'point': [100, 70], 'damage_type': 'tear', 'offset_mm': .4, 'tolerance': 30}
+    with TestClient(api.app) as client:
+        preview_response = client.post('/api/jobs/' + 'a'*32 + '/cracks/trace', json=request)
+        assert preview_response.status_code == 200
+        preview = preview_response.json()
+        assert len(load_cracks(tmp_path)['candidates']) == count
+        apply_response = client.post('/api/jobs/' + 'a'*32 + '/cracks/trace/apply', json=request)
+        assert apply_response.status_code == 200
+        applied = apply_response.json()
+    assert preview['bbox'][0] <= 100 and preview['area_mm2'] > 0
+    assert len(applied['candidates']) == count + 1
+    assert applied['candidates'][0]['source'] == 'manual'
+    assert applied['candidates'][0]['status'] == 'pending'
+    assert applied['candidates'][0]['suggested_damage_type'] == 'tear'
+    retained = propose_cracks(tmp_path, 'geometry', 'normal')
+    assert applied['candidates'][0]['id'] in {item['id'] for item in retained['candidates']}
+    if original['candidates']:
+        candidate_id = original['candidates'][0]['id']
+        changed = trace_crack(tmp_path, None, 'tear', .4, 30, candidate_id, apply=True)
+        assert next(item for item in changed['candidates'] if item['id'] == candidate_id)['selection_source'] == 'guided'
+        again = propose_cracks(tmp_path, 'geometry', 'high')
+        assert sum(item['id'] == candidate_id for item in again['candidates']) == 1
+    with pytest.raises(ValueError, match='검은 핵심부'):
+        trace_crack(tmp_path, [100, 195], 'tear', .4, 30)
+
+
+def test_guided_click_rejects_dark_damage_outside_authored_zone(tmp_path):
+    image = np.full((200, 300, 3), 155, np.uint8)
+    cv2.line(image, (210, 70), (265, 70), (12, 12, 12), 4)
+    cv2.imwrite(str(tmp_path / 'panorama.png'), image)
+    (tmp_path / 'quality_report.json').write_text(json.dumps({
+        'settings': {'width_mm': 80, 'pitch_mm': 20, 'pixels_per_mm': 3},
+    }), encoding='utf-8')
+    _test_zones(tmp_path, [[0, 0], [145, 0], [145, 199], [0, 199]])
+    propose_cracks(tmp_path, 'geometry', 'normal')
+    with pytest.raises(ValueError, match='지정된 영역'):
+        trace_crack(tmp_path, [230, 70], 'chip_cut', 1.5, 30)
 
 
 def test_reproposal_keeps_reviewed_candidate_and_manual_path(tmp_path):

@@ -1,4 +1,4 @@
-import type { HalfTurnResult, Job, JobList, Point, SampleList, ZoneAnalysis, ZoneAssistResult, ZoneGroup, ZoneInstances, ZoneShape } from './types'
+import type { CrackReview, HalfTurnResult, Job, JobList, Point, SampleList, ZoneAnalysis, ZoneAssistResult, ZoneGroup, ZoneInstances, ZoneShape } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, options)
@@ -30,6 +30,17 @@ export const api = {
   suggestHalfTurn: (id: string, polygon: Point[], repeat_pitches: number) => request<HalfTurnResult>(`/api/jobs/${id}/zones/half-turn`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ polygon, repeat_pitches }),
   }),
+  cracks: (id: string) => request<CrackReview>(`/api/jobs/${id}/cracks`),
+  proposeCracks: (id: string, group_id: string, sensitivity: 'low' | 'normal' | 'high') => request<CrackReview>(`/api/jobs/${id}/cracks/propose`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_id, sensitivity }),
+  }),
+  reviewCrack: (id: string, candidateId: string, status: 'pending' | 'accepted' | 'excluded') => request<CrackReview>(`/api/jobs/${id}/cracks/${candidateId}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }),
+  }),
+  addManualCrack: (id: string, points: Point[]) => request<CrackReview>(`/api/jobs/${id}/cracks/manual`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points }),
+  }),
+  deleteManualCrack: (id: string, candidateId: string) => request<CrackReview>(`/api/jobs/${id}/cracks/${candidateId}`, { method: 'DELETE' }),
 }
 
 export function fileBase(jobId: string) { return `/api/jobs/${jobId}/files` }

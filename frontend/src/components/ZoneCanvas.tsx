@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import OpenSeadragon from 'openseadragon'
 import { Maximize2, Minus, Plus } from 'lucide-react'
-import type { Point, ZoneAnalysis, ZoneInstance, ZoneShape } from '../types'
+import type { CrackCandidate, Point, ZoneAnalysis, ZoneInstance, ZoneShape } from '../types'
 import { fileBase, zoneFileBase } from '../api'
 import styles from '../pages/ZoneWorkspace.module.css'
 
@@ -21,6 +21,10 @@ type Props = {
   selectedSegment: { shapeId: string; placement: number } | null
   onSegmentSelect: (shapeId: string, placement: number) => void
   onSegmentMove: (shapeId: string, placement: number, offset: Point) => void
+  crackCandidates?: CrackCandidate[]
+  selectedCrackId?: string | null
+  onCrackSelect?: (id: string) => void
+  hint?: string
   onAdd: (point: Point) => void
   onInsert: (index: number, point: Point) => void
   onMoveStart: (index: number) => void
@@ -34,6 +38,7 @@ type Props = {
 
 export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, closedShapes, selectedVertex, opacity,
   focusShape, suggestedPolygon, segmentInstances, adjustingSegments, selectedSegment, onSegmentSelect, onSegmentMove,
+  crackCandidates = [], selectedCrackId = null, onCrackSelect, hint,
   onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete, onClose, onClosedMove, onClosedDelete }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<SVGSVGElement>(null)
@@ -248,6 +253,16 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
         })}
       </g>)}
       {suggestedPolygon && <polygon points={polygon(suggestedPolygon)} className={styles.symmetrySuggestion} />}
+      {crackCandidates.map(candidate => {
+        const [x, y, width, height] = candidate.bbox
+        const [cx, cy] = project([x + width/2, y + height/2])
+        if (cx < -15 || cx > size.width + 15 || cy < -15 || cy > size.height + 15) return null
+        const selected = selectedCrackId === candidate.id
+        return <g key={candidate.id} style={{ pointerEvents: 'all', cursor: 'pointer' }} onClick={event => { event.stopPropagation(); onCrackSelect?.(candidate.id) }}>
+          {selected && <polygon points={polygon(candidate.polygon)} className={styles.crackOutline} />}
+          <circle cx={cx} cy={cy} r={selected ? 9 : 5} className={candidate.status === 'accepted' ? styles.crackAccepted : candidate.status === 'excluded' ? styles.crackExcluded : styles.crackPending} />
+        </g>
+      })}
       {adjustingSegments && segmentInstances.map(instance => {
         const key = `${instance.shape_id}:${instance.placement}`
         const xs = instance.polygon.map(point => point[0]), ys = instance.polygon.map(point => point[1])
@@ -294,8 +309,8 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     <div className={styles.zoomControls}><button onClick={() => viewer.current?.viewport.zoomBy(1.4)} aria-label="확대"><Plus size={17} /></button>
       <button onClick={() => viewer.current?.viewport.zoomBy(1/1.4)} aria-label="축소"><Minus size={17} /></button>
       <button onClick={() => viewer.current?.viewport.goHome()} aria-label="전체 보기"><Maximize2 size={17} /></button></div>
-    <div className={styles.canvasHint}>{editing ? '첫 점 클릭으로 도형 닫기 · 휠 확대·축소 · 휠 버튼 드래그로 이동 · 닫힌 도형 점 드래그'
+    <div className={styles.canvasHint}>{hint ?? (editing ? '첫 점 클릭으로 도형 닫기 · 휠 확대·축소 · 휠 버튼 드래그로 이동 · 닫힌 도형 점 드래그'
       : adjustingSegments ? '십자 핸들 드래그로 이 세그먼트만 이동 · 빈 사진 드래그로 화면 이동'
-      : '휠로 확대 · 왼쪽 또는 휠 버튼 드래그로 이동'}</div>
+      : '휠로 확대 · 왼쪽 또는 휠 버튼 드래그로 이동')}</div>
   </div>
 }

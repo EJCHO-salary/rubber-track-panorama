@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, ArrowLeft, Check, ChevronRight, Eraser, Eye, Layers3, Magnet, Move, PenLine, Plus, Trash2, Undo2, X } from 'lucide-react'
+import { AlertCircle, ArrowLeft, Check, ChevronRight, Eraser, Eye, Layers3, Magnet, Move, PenLine, Plus, ScanSearch, Trash2, Undo2, X } from 'lucide-react'
 import { Link, useParams } from 'react-router'
 import { api, formatNumber } from '../api'
 import type { HalfTurnResult, Point, ZoneAnalysis, ZoneGroup, ZoneSection, ZoneShape } from '../types'
@@ -215,7 +215,8 @@ export default function ZoneWorkspace() {
     <div className={styles.crumb}><Link to={`/jobs/${id}`}><ArrowLeft size={16} /> 작업 결과</Link><ChevronRight size={14} /><span>영역 편집</span></div>
     <div className={styles.heading}><div><span className={styles.eyebrow}>SURFACE MAP / EDITOR</span><h2>영역 편집기</h2>
       <p>{formatNumber(job.data.settings.width_mm)} mm 폭 · {formatNumber(job.data.settings.pitch_mm)} mm 피치 · 분류 체계별로 독립적인 영역 지도를 만듭니다.</p></div>
-      <span className={styles.coverageBadge}><Check size={15} /> {analysis.groups.length}개 분류 체계</span></div>
+      <div className={styles.headingActions}><span className={styles.coverageBadge}><Check size={15} /> {analysis.groups.length}개 분류 체계</span>
+        <Link className={styles.subtleButton} to={`/jobs/${id}/cracks`}><ScanSearch size={16} /> 크랙 후보 검토</Link></div></div>
     <div className={styles.warning}><AlertCircle size={18} /><span>형상·손상 자동 판정은 없습니다. 직접 그리거나 경계 보조 선택을 사용하세요. 각 체계의 남는 부분은 지정한 기본 섹션으로 채웁니다.</span></div>
     {error && <div className={styles.error} role="alert"><AlertCircle size={16} />{error}<button onClick={() => setError('')} aria-label="오류 닫기"><X size={15} /></button></div>}
     <div className={styles.groupBar}><div className={styles.barTitle}><span className={styles.eyebrow}>CLASSIFICATION LAYERS</span><strong>분류 체계</strong><small>체계 간 영역은 겹쳐도 됩니다.</small></div>

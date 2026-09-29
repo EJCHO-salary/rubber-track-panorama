@@ -114,3 +114,28 @@ export interface HalfTurnResult {
   pitch_anchor_source: 'image' | 'nominal'
   reason: string | null
 }
+
+export interface CrackCandidate {
+  id: string
+  section_id: string
+  polygon: Point[]
+  bbox: [number, number, number, number]
+  status: 'pending' | 'accepted' | 'excluded'
+  source: 'automatic' | 'manual'
+  length_mm: number
+  contrast: number
+  score: number
+}
+
+export interface CrackReview {
+  ready: boolean
+  stale: boolean
+  created_at?: string
+  zone_created_at?: string
+  group_id?: string
+  sensitivity?: 'low' | 'normal' | 'high'
+  sections?: { id: string; name: string; color: string }[]
+  candidates?: CrackCandidate[]
+  summary?: Record<string, { proposed: number; accepted: number; excluded: number; length_mm: number }>
+  totals?: { proposed: number; accepted: number; excluded: number; length_mm: number }
+}

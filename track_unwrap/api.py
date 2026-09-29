@@ -18,6 +18,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, StrictInt
 
 from .zones import assist_polygon, build_zones, list_zone_instances, load_zones, suggest_half_turn
+from .cracks import add_manual_crack, delete_manual_crack, load_cracks, propose_cracks, review_crack
 from .pipeline import Settings, unwrap
 
 
@@ -247,6 +248,19 @@ class ZoneHalfTurn(BaseModel):
     repeat_pitches: StrictInt
 
 
+class CrackProposal(BaseModel):
+    group_id: str
+    sensitivity: str = 'normal'
+
+
+class CrackReview(BaseModel):
+    status: str
+
+
+class ManualCrack(BaseModel):
+    points: list[list[float]]
+
+
 @app.post('/api/jobs', status_code=202)
 async def create_job(width_mm: float = Form(...), pitch_mm: float = Form(...),
                      total_links: str | None = Form(None), images: list[UploadFile] = File(...)):
@@ -451,6 +465,61 @@ def get_job_zone_instances(job_id: str, group_id: str, section_id: str):
             raise HTTPException(422, str(exc)) from exc
 
 
+@app.get('/api/jobs/{job_id}/cracks')
+def get_job_cracks(job_id: str):
+    result_dir = _zones_dir(job_id)
+    with _zone_lock(job_id):
+        data = load_cracks(result_dir)
+        if data is None:
+            return {'ready': False, 'stale': False}
+        zones = load_zones(result_dir)
+        return {**data, 'ready': True, 'stale': not zones or data['zone_created_at'] != zones['created_at']}
+
+
+@app.post('/api/jobs/{job_id}/cracks/propose')
+def propose_job_cracks(job_id: str, request: CrackProposal):
+    result_dir = _zones_dir(job_id)
+    with _zone_lock(job_id):
+        try:
+            return {**propose_cracks(result_dir, request.group_id, request.sensitivity), 'ready': True, 'stale': False}
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+
+@app.patch('/api/jobs/{job_id}/cracks/{candidate_id}')
+def review_job_crack(job_id: str, candidate_id: str, request: CrackReview):
+    result_dir = _zones_dir(job_id)
+    with _zone_lock(job_id):
+        try:
+            data = load_cracks(result_dir)
+            zones = load_zones(result_dir)
+            if data and zones and data['zone_created_at'] != zones['created_at']:
+                raise ValueError('영역이 변경되었습니다. 크랙 후보를 다시 생성해 주세요.')
+            return {**review_crack(result_dir, candidate_id, request.status), 'ready': True, 'stale': False}
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+
+@app.post('/api/jobs/{job_id}/cracks/manual')
+def add_job_manual_crack(job_id: str, request: ManualCrack):
+    result_dir = _zones_dir(job_id)
+    with _zone_lock(job_id):
+        try:
+            return {**add_manual_crack(result_dir, request.points), 'ready': True, 'stale': False}
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+
+@app.delete('/api/jobs/{job_id}/cracks/{candidate_id}')
+def delete_job_manual_crack(job_id: str, candidate_id: str):
+    result_dir = _zones_dir(job_id)
+    with _zone_lock(job_id):
+        try:
+            return {**delete_manual_crack(result_dir, candidate_id), 'ready': True, 'stale': False}
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+
 @app.get('/api/jobs/{job_id}/zones/groups/{group_id}/{kind}.png')
 def job_zone_artifact(job_id: str, group_id: str, kind: str):
     result_dir = _zones_dir(job_id)
@@ -547,6 +616,7 @@ def frontend_asset(asset_path: str):
 @app.get('/new')
 @app.get('/jobs/{job_id}')
 @app.get('/jobs/{job_id}/analysis')
+@app.get('/jobs/{job_id}/cracks')
 @app.get('/samples/{case_name}')
 def frontend_route():
     return _front_page()

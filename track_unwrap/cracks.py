@@ -132,6 +132,20 @@ def _same_damage_location(first, second):
     return smaller > 0 and overlap / smaller >= .5
 
 
+def _inside_authored(candidate, authored, scale_x, scale_y):
+    """Keep a prior review only when its displayed area lies in drawn zones."""
+    points = np.asarray(candidate['polygon'], dtype=np.float32)
+    if len(points) < 3:
+        return False
+    contour = np.rint(points / [scale_x, scale_y]).astype(np.int32)
+    x, y, width, height = cv2.boundingRect(contour)
+    if x < 0 or y < 0 or x + width > authored.shape[1] or y + height > authored.shape[0]:
+        return False
+    footprint = np.zeros((height, width), np.uint8)
+    cv2.fillPoly(footprint, [contour - [x, y]], 1)
+    return bool(np.any(footprint) and np.all(authored[y:y+height, x:x+width][footprint > 0] > 0))
+
+
 def propose_cracks(result_dir, group_id, sensitivity='normal'):
     """Regenerate dark-core candidates while retaining explicit human review."""
     if sensitivity not in {'low', 'normal', 'high'}:
@@ -144,9 +158,10 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
         raise ValueError('분류 체계를 찾을 수 없습니다.')
     previous = load_cracks(result_dir)
     mask = cv2.imread(str(Path(result_dir) / 'zones' / f'group_{group_id}_mask.png'), cv2.IMREAD_GRAYSCALE)
+    authored = cv2.imread(str(Path(result_dir) / 'zones' / f'group_{group_id}_authored.png'), cv2.IMREAD_GRAYSCALE)
     original = cv2.imread(str(Path(result_dir) / 'panorama.png'), cv2.IMREAD_GRAYSCALE)
-    if mask is None or original is None:
-        raise ValueError('전개 사진 또는 영역 마스크를 읽을 수 없습니다.')
+    if mask is None or authored is None or original is None or mask.shape != authored.shape:
+        raise ValueError('전개 사진 또는 지정 영역 마스크를 읽을 수 없습니다.')
     h, w = mask.shape
     gray = cv2.resize(original, (w, h), interpolation=cv2.INTER_AREA)
     # Black-hat finds dark fissures against a locally brighter rubber surface.
@@ -156,7 +171,10 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
         cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19))))
     scale_x, scale_y = original.shape[1] / w, original.shape[0] / h
     response = _pattern_residual(response, zones['pitch_anchors_x'], scale_x)
-    binary, core_limit = _dark_fissure_mask(gray, response, mask, sensitivity)
+    # The classification mask fills all gaps with a default section. Only the
+    # separately rasterized, user-authored polygons are valid crack territory.
+    detection_mask = np.where(authored > 0, mask, 0).astype(np.uint8)
+    binary, core_limit = _dark_fissure_mask(gray, response, detection_mask, sensitivity)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
     ppm = float(zones['nominal_pixels_per_mm'])
     candidates = []
@@ -195,6 +213,8 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
         length_mm = length_px * np.sqrt(scale_x * scale_y) / ppm
         score = round(min(1., (contrast / 105) * min(elongation / 4, 1.)), 3)
         polygon = [[round((x + float(px)) * scale_x, 1), round((y + float(py)) * scale_y, 1)] for px, py in outline]
+        if not _inside_authored({'polygon': polygon}, authored, scale_x, scale_y):
+            continue
         candidates.append({'id': uuid4().hex[:12], 'section_id': group['sections'][section_code-1]['id'],
                            'polygon': polygon, 'status': 'pending', 'source': 'automatic', 'damage_type': None,
                            'decision_source': None,
@@ -204,7 +224,8 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = candidates[:400]
     if previous and previous.get('group_id') == group_id and previous.get('zone_created_at') == zones['created_at']:
-        reviewed = [item for item in previous['candidates'] if item['status'] != 'pending']
+        reviewed = [item for item in previous['candidates'] if item['status'] != 'pending'
+                    and _inside_authored(item, authored, scale_x, scale_y)]
         candidates = reviewed + [item for item in candidates
                                  if not any(_same_damage_location(item, saved) for saved in reviewed)]
     data = {'version': 1, 'created_at': datetime.now(timezone.utc).isoformat(), 'zone_created_at': zones['created_at'],
@@ -275,13 +296,19 @@ def add_manual_crack(result_dir, points):
     if length_px < 3:
         raise ValueError('균열 경로가 너무 짧습니다.')
     mask = cv2.imread(str(Path(result_dir) / 'zones' / f"group_{data['group_id']}_mask.png"), cv2.IMREAD_GRAYSCALE)
-    if mask is None:
-        raise ValueError('영역 마스크를 읽을 수 없습니다.')
+    authored = cv2.imread(str(Path(result_dir) / 'zones' / f"group_{data['group_id']}_authored.png"), cv2.IMREAD_GRAYSCALE)
+    if mask is None or authored is None or mask.shape != authored.shape:
+        raise ValueError('지정 영역 마스크를 읽을 수 없습니다.')
     h, w = mask.shape
     sx, sy = w / width, h / height
-    raster = np.zeros_like(mask)
     work_points = np.rint(path * [sx, sy]).astype(np.int32)
+    centerline = np.zeros_like(mask)
+    cv2.polylines(centerline, [work_points], False, 255, 1)
+    if np.any((centerline > 0) & (authored == 0)):
+        raise ValueError('수동 균열 경로는 지정된 영역 안에 그려 주세요.')
+    raster = np.zeros_like(mask)
     cv2.polylines(raster, [work_points], False, 255, 3)
+    raster[authored == 0] = 0
     section_pixels = mask[raster > 0]
     code = int(np.bincount(section_pixels, minlength=len(data['sections'])+1)[1:].argmax() + 1)
     contours, _ = cv2.findContours(raster, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -294,6 +321,8 @@ def add_manual_crack(result_dir, points):
                  'area_mm2': round(_polygon_area(contour) / (sx * sy * zones['nominal_pixels_per_mm'] ** 2), 2),
                  'contrast': 0., 'score': 1.,
                  'bbox': [round(x/sx, 1), round(y/sy, 1), round(bw/sx, 1), round(bh/sy, 1)]}
+    if not _inside_authored(candidate, authored, 1 / sx, 1 / sy):
+        raise ValueError('수동 균열 경로는 지정된 영역 안에 그려 주세요.')
     data['candidates'].insert(0, candidate)
     return _write(result_dir, _summary(data))
 

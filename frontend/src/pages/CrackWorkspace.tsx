@@ -102,7 +102,7 @@ export default function CrackWorkspace() {
         hint={drawing ? '사진을 따라 점을 찍어 균열 경로를 그리세요 · 휠 확대 · 휠 버튼으로 이동' : '드래그 선택 · Shift+드래그 추가 · 다시 선택하여 해제 · 휠 확대 · 휠 버튼 이동'} />
       <div className={styles.legend}><span><i className={styles.pendingDot} /> 미검토 영역</span><span><i className={styles.acceptedDot} /> 채택 영역</span><span><i className={styles.excludedDot} /> 제외 영역</span><span><i className={styles.selectionDot} /> 현재 선택</span></div>
     </section><aside className={styles.sidePanel}>
-      <div className={styles.setup}><strong>후보 탐색</strong><p>그레이스케일에서 연속된 거의 검은 핵심부를 찾고, 분필 자국 주변과 반복 형상 경계를 억제합니다. 결과는 검토용 초안입니다.</p>
+      <div className={styles.setup}><strong>후보 탐색</strong><p>사용자가 지정한 도형 안에서만 연속된 거의 검은 핵심부를 찾고, 분필 자국 주변과 반복 형상 경계를 억제합니다. 지정되지 않은 빈 영역은 탐색하지 않습니다.</p>
         <label>분류 체계<select value={groupId} onChange={event => setGroupId(event.target.value)}>{zones.data.groups.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <label>민감도<select value={sensitivity} onChange={event => setSensitivity(event.target.value as typeof sensitivity)}><option value="low">낮음 · 강한 후보</option><option value="normal">보통</option><option value="high">높음 · 작은 후보 포함</option></select></label>
         <button className={styles.propose} disabled={proposal.isPending || clear.isPending || decision.isPending || manual.isPending || removeManual.isPending} onClick={() => proposal.mutate()}><ScanSearch size={16} /> {proposal.isPending ? '탐색 중…' : data.ready ? '후보 다시 찾기' : '크랙 후보 찾기'}</button>

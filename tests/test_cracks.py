@@ -2,11 +2,20 @@ import json
 
 import cv2
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from track_unwrap import api
 from track_unwrap.cracks import _dark_fissure_mask, add_manual_crack, delete_manual_crack, load_cracks, propose_cracks, review_crack, review_cracks
 from track_unwrap.zones import build_zones
+
+
+def _test_zones(folder, polygon=None):
+    taxonomy = [{'id': 'geometry', 'name': '형상', 'default_section_id': 'surface',
+                 'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866', 'repeat_mode': 'independent'}]}]
+    shapes = [] if polygon is None else [{'id': 'drawn', 'group_id': 'geometry', 'section_id': 'surface',
+                                         'repeat': False, 'repeat_pitches': 1, 'polygon': polygon}]
+    return build_zones(folder, taxonomy, shapes)
 
 
 def test_unique_fissure_can_be_reviewed_and_counted_by_section(tmp_path):
@@ -18,9 +27,7 @@ def test_unique_fissure_can_be_reviewed_and_counted_by_section(tmp_path):
     (tmp_path / 'quality_report.json').write_text(json.dumps({
         'settings': {'width_mm': 80, 'pitch_mm': 20, 'pixels_per_mm': 2.5},
     }), encoding='utf-8')
-    taxonomy = [{'id': 'geometry', 'name': '형상', 'default_section_id': 'surface',
-                 'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866', 'repeat_mode': 'independent'}]}]
-    build_zones(tmp_path, taxonomy, [])
+    _test_zones(tmp_path, [[0, 0], [499, 0], [499, 199], [0, 199]])
     result = propose_cracks(tmp_path, 'geometry', 'high')
     fissures = [item for item in result['candidates'] if item['bbox'][0] <= 195 <= item['bbox'][0]+item['bbox'][2]
                 and item['bbox'][1] <= 45 <= item['bbox'][1]+item['bbox'][3]]
@@ -93,9 +100,7 @@ def test_reproposal_keeps_reviewed_candidate_and_manual_path(tmp_path):
     (tmp_path / 'quality_report.json').write_text(json.dumps({
         'settings': {'width_mm': 80, 'pitch_mm': 20, 'pixels_per_mm': 2.5},
     }), encoding='utf-8')
-    taxonomy = [{'id': 'geometry', 'name': '형상', 'default_section_id': 'surface',
-                 'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866', 'repeat_mode': 'independent'}]}]
-    build_zones(tmp_path, taxonomy, [])
+    _test_zones(tmp_path, [[0, 0], [499, 0], [499, 199], [0, 199]])
     first = propose_cracks(tmp_path, 'geometry', 'high')
     assert first['candidates']
     reviewed = review_crack(tmp_path, first['candidates'][0]['id'], 'excluded')
@@ -114,8 +119,7 @@ def test_clear_all_candidates_then_repropose_from_current_detector(tmp_path, mon
     (tmp_path / 'quality_report.json').write_text(json.dumps({
         'settings': {'width_mm': 80, 'pitch_mm': 20, 'pixels_per_mm': 2.5},
     }), encoding='utf-8')
-    build_zones(tmp_path, [{'id': 'geometry', 'name': '형상', 'default_section_id': 'surface',
-        'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866', 'repeat_mode': 'independent'}]}], [])
+    _test_zones(tmp_path, [[0, 0], [499, 0], [499, 199], [0, 199]])
     zone_path = tmp_path / 'zones' / 'analysis.json'
     monkeypatch.setattr(api, '_zones_dir', lambda _: tmp_path)
     job_id = 'a' * 32
@@ -137,3 +141,31 @@ def test_clear_all_candidates_then_repropose_from_current_detector(tmp_path, mon
         assert fresh['candidates']
         assert fresh['totals']['excluded'] == fresh['totals']['accepted'] == 0
         assert all(item['status'] == 'pending' and item['source'] == 'automatic' for item in fresh['candidates'])
+
+
+def test_only_drawn_area_produces_crack_candidates(tmp_path):
+    image = np.full((200, 500, 3), 155, np.uint8)
+    cv2.line(image, (183, 22), (211, 61), (15, 15, 15), 3)
+    cv2.line(image, (320, 22), (348, 61), (15, 15, 15), 3)
+    cv2.imwrite(str(tmp_path / 'panorama.png'), image)
+    (tmp_path / 'quality_report.json').write_text(json.dumps({
+        'settings': {'width_mm': 80, 'pitch_mm': 20, 'pixels_per_mm': 2.5},
+    }), encoding='utf-8')
+    _test_zones(tmp_path)
+    assert propose_cracks(tmp_path, 'geometry', 'high')['candidates'] == []
+    # The fallback classification mask labels the entire image as surface, but
+    # the explicitly drawn mask covers only the first dark fissure.
+    _test_zones(tmp_path, [[155, 8], [235, 8], [235, 80], [155, 80]])
+    result = propose_cracks(tmp_path, 'geometry', 'high')
+    assert result['candidates']
+    assert all(item['bbox'][0] + item['bbox'][2] < 235 for item in result['candidates'])
+    saved = load_cracks(tmp_path)
+    obsolete = dict(saved['candidates'][0], id='outside', status='excluded')
+    obsolete['polygon'] = [[x + 137, y] for x, y in obsolete['polygon']]
+    obsolete['bbox'] = [obsolete['bbox'][0] + 137, *obsolete['bbox'][1:]]
+    saved['candidates'].append(obsolete)
+    (tmp_path / 'cracks' / 'review.json').write_text(json.dumps(saved), encoding='utf-8')
+    regenerated = propose_cracks(tmp_path, 'geometry', 'high')
+    assert 'outside' not in {item['id'] for item in regenerated['candidates']}
+    with pytest.raises(ValueError, match='지정된 영역'):
+        add_manual_crack(tmp_path, [[320, 22], [348, 61]])

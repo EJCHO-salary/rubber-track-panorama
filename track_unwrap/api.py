@@ -275,6 +275,7 @@ class GuidedCrackSelection(BaseModel):
     damage_type: str
     offset_mm: float = Field(ge=0, le=5)
     tolerance: int = Field(ge=15, le=100)
+    seed_radius_px: int = Field(default=18, ge=1, le=320)
 
 
 @app.post('/api/jobs', status_code=202)
@@ -516,7 +517,8 @@ def preview_crack_trace(job_id: str, request: GuidedCrackSelection):
     with _zone_lock(job_id):
         try:
             return trace_crack(result_dir, request.point, request.damage_type,
-                               request.offset_mm, request.tolerance, request.candidate_id)
+                               request.offset_mm, request.tolerance, request.candidate_id,
+                               seed_radius_px=request.seed_radius_px)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -527,7 +529,8 @@ def apply_crack_trace(job_id: str, request: GuidedCrackSelection):
     with _zone_lock(job_id):
         try:
             return {**trace_crack(result_dir, request.point, request.damage_type,
-                                  request.offset_mm, request.tolerance, request.candidate_id, apply=True),
+                                  request.offset_mm, request.tolerance, request.candidate_id,
+                                  apply=True, seed_radius_px=request.seed_radius_px),
                     'ready': True, 'stale': False}
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc

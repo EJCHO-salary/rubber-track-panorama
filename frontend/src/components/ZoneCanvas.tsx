@@ -27,7 +27,8 @@ type Props = {
   onCrackMarquee?: (ids: string[], shift: boolean) => void
   tracePicking?: boolean
   tracePolygon?: Point[] | null
-  onCrackSeed?: (point: Point, candidateId: string | null) => void
+  traceSeed?: Point | null
+  onCrackSeed?: (point: Point, candidateId: string | null, seedRadiusPx: number) => void
   hint?: string
   onAdd: (point: Point) => void
   onInsert: (index: number, point: Point) => void
@@ -43,7 +44,7 @@ type Props = {
 export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, closedShapes, selectedVertex, opacity,
   focusShape, suggestedPolygon, segmentInstances, adjustingSegments, selectedSegment, onSegmentSelect, onSegmentMove,
   crackCandidates = [], selectedCrackIds = [], onCrackSelect, onCrackMarquee,
-  tracePicking = false, tracePolygon, onCrackSeed, hint,
+  tracePicking = false, tracePolygon, traceSeed, onCrackSeed, hint,
   onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete, onClose, onClosedMove, onClosedDelete }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<SVGSVGElement>(null)
@@ -121,6 +122,12 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     const bounds = overlayRef.current!.getBoundingClientRect()
     return [event.clientX - bounds.left, event.clientY - bounds.top]
   }
+  function imageRadiusForScreenPixels(screenPixels: number): number {
+    if (!viewer.current) return 18
+    const origin = viewer.current.viewport.viewerElementToImageCoordinates(new OpenSeadragon.Point(0, 0))
+    const offset = viewer.current.viewport.viewerElementToImageCoordinates(new OpenSeadragon.Point(screenPixels, 0))
+    return Math.max(18, Math.min(320, Math.round(Math.abs(offset.x - origin.x))))
+  }
   function startCrackSelection(event: React.PointerEvent<SVGSVGElement>) {
     if (!selectingCracks || event.button !== 0) return
     const target = event.target as Element
@@ -141,7 +148,7 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     if (tracePicking) {
       if (Math.hypot(end[0] - start.point[0], end[1] - start.point[1]) <= 4) {
         const point = unproject(event)
-        if (point) onCrackSeed?.(point, start.candidateId)
+        if (point) onCrackSeed?.(point, start.candidateId, imageRadiusForScreenPixels(20))
       }
     } else if (Math.hypot(end[0] - start.point[0], end[1] - start.point[1]) > 4) {
       const bounds = [Math.min(start.point[0], end[0]), Math.min(start.point[1], end[1]),
@@ -315,6 +322,8 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
         </g>
       })}
       {tracePolygon && <polygon points={polygon(tracePolygon)} className={styles.crackTracePreview} pointerEvents="none" />}
+      {traceSeed && <circle cx={project(traceSeed)[0]} cy={project(traceSeed)[1]} r={6}
+        className={styles.crackTraceSeed} pointerEvents="none" />}
       {selectionStart.current && selectionEnd && <rect x={Math.min(selectionStart.current.point[0], selectionEnd[0])}
         y={Math.min(selectionStart.current.point[1], selectionEnd[1])}
         width={Math.abs(selectionEnd[0] - selectionStart.current.point[0])}

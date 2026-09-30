@@ -139,6 +139,7 @@ export interface CrackTraceRequest {
   damage_type: 'chunk' | 'tear' | 'chip_cut'
   offset_mm: number
   tolerance: number
+  seed_radius_px: number
 }
 
 export interface CrackTracePreview {
@@ -148,6 +149,7 @@ export interface CrackTracePreview {
   damage_type: CrackTraceRequest['damage_type']
   candidate_id: string | null
   seed: Point
+  warning?: string | null
 }
 
 export interface CrackReview {

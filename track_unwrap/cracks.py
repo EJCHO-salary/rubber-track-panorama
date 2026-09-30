@@ -344,7 +344,7 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
     return _write(result_dir, _summary(data))
 
 
-def _trace_dark_component(gray, valid, seed, tolerance, offset_px):
+def _trace_dark_component(gray, valid, seed, tolerance, offset_px, seed_radius_px=18):
     """Select one near-black connected region, then add a measured outline offset."""
     if not 15 <= tolerance <= 100:
         raise ValueError('색상 허용 범위는 15~100이어야 합니다.')
@@ -356,19 +356,20 @@ def _trace_dark_component(gray, valid, seed, tolerance, offset_px):
     smooth = cv2.GaussianBlur(gray, (3, 3), .7)
     background = cv2.GaussianBlur(smooth, (0, 0), 12)
     contrast = background.astype(np.int16) - smooth.astype(np.int16)
-    radius = 18
+    radius = int(seed_radius_px)
     x0, y0 = max(0, sx-radius), max(0, sy-radius)
     x1, y1 = min(gray.shape[1], sx+radius+1), min(gray.shape[0], sy+radius+1)
     nearby = valid[y0:y1, x0:x1].astype(bool)
-    near_core = nearby & (smooth[y0:y1, x0:x1] <= 72) & (contrast[y0:y1, x0:x1] >= 17)
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    near_core = (nearby & (smooth[y0:y1, x0:x1] <= 72)
+                 & (contrast[y0:y1, x0:x1] >= 17)
+                 & ((xx - sx) ** 2 + (yy - sy) ** 2 <= radius ** 2))
     if not np.any(near_core):
-        raise ValueError('클릭한 곳 가까이에 연속된 검은 핵심부가 없습니다. 더 어두운 지점을 클릭해 주세요.')
+        raise ValueError('클릭한 곳 가까이에 검은 핵심부가 없습니다. 사진을 확대해 검은 균열을 다시 클릭해 주세요.')
     yy, xx = np.nonzero(near_core)
     distances = (xx + x0 - sx) ** 2 + (yy + y0 - sy) ** 2
     closest = int(np.argmin(distances))
     sx, sy = int(xx[closest] + x0), int(yy[closest] + y0)
-    if distances[closest] > 18 ** 2:
-        raise ValueError('검은 핵심부 가까이를 클릭해 주세요.')
     limit = min(125, max(72, int(smooth[sy, sx]) + tolerance))
     possible = np.uint8((smooth <= limit) & (contrast >= 11) & (valid > 0))
     # A short interruption from glare or compression should not split one tear.
@@ -400,12 +401,28 @@ def _trace_dark_component(gray, valid, seed, tolerance, offset_px):
     return contour, selected, (sx, sy)
 
 
-def trace_crack(result_dir, point, damage_type, offset_mm, tolerance=55, candidate_id=None, apply=False):
+def _repair_narrow_authored_seams(authored, pixels_per_mm):
+    """Join raster gaps below 2 mm between authored regions, without filling large holes."""
+    span = max(3, min(31, int(round(pixels_per_mm * 2)) + 1))
+    if span % 2 == 0:
+        span += 1
+    mask = np.uint8(authored > 0)
+    across_rows = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
+                                   cv2.getStructuringElement(cv2.MORPH_RECT, (1, span)))
+    across_columns = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
+                                      cv2.getStructuringElement(cv2.MORPH_RECT, (span, 1)))
+    return cv2.bitwise_or(across_rows, across_columns)
+
+
+def trace_crack(result_dir, point, damage_type, offset_mm, tolerance=55, candidate_id=None,
+                apply=False, seed_radius_px=18):
     """Preview or persist a Photoshop-like seeded crack selection."""
     if damage_type not in DAMAGE_TYPES:
         raise ValueError('손상 유형이 올바르지 않습니다.')
     if not np.isfinite(offset_mm) or not 0 <= offset_mm <= 5:
         raise ValueError('경계 여유는 0~5 mm로 지정해 주세요.')
+    if not 1 <= seed_radius_px <= 320:
+        raise ValueError('클릭 허용 거리는 1~320 픽셀이어야 합니다.')
     data, zones = load_cracks(result_dir), load_zones(result_dir)
     if not data or not zones or data['zone_created_at'] != zones['created_at']:
         raise ValueError('현재 영역에서 크랙 후보를 먼저 생성해 주세요.')
@@ -441,17 +458,28 @@ def trace_crack(result_dir, point, damage_type, offset_mm, tolerance=55, candida
         right = min(image_w, max(right, int(bx+bw)+margin))
         bottom = min(image_h, max(bottom, int(by+bh)+margin))
     gray = original[top:bottom, left:right]
-    valid = cv2.resize(authored, (image_w, image_h), interpolation=cv2.INTER_NEAREST)[top:bottom, left:right]
+    authored_crop = cv2.resize(authored, (image_w, image_h), interpolation=cv2.INTER_NEAREST)[top:bottom, left:right]
+    valid = _repair_narrow_authored_seams(authored_crop, ppm)
     # The seed guides a local selection. A dark lug edge must not flood across
     # several pitches just because its shadow touches the chosen fissure.
     growth = np.zeros(gray.shape, np.uint8)
     if candidate:
         bx, by, bw, bh = candidate['bbox']
-        allowance = round(ppm * (20 if damage_type == 'tear' else 8))
-        gx0, gy0 = max(0, int(bx)-allowance-left), max(0, int(by)-allowance-top)
-        gx1, gy1 = min(gray.shape[1], int(bx+bw)+allowance-left), min(gray.shape[0], int(by+bh)+allowance-top)
+        if damage_type == 'tear':
+            # A truncated proposal should be allowed to follow the same thin
+            # fissure well beyond its old box, without searching far sideways.
+            if bh > bw * 1.2:
+                margin_x, margin_y = round(ppm * 12), round(ppm * 60)
+            elif bw > bh * 1.2:
+                margin_x, margin_y = round(ppm * 60), round(ppm * 12)
+            else:
+                margin_x = margin_y = round(ppm * 40)
+        else:
+            margin_x = margin_y = round(ppm * 8)
+        gx0, gy0 = max(0, int(bx)-margin_x-left), max(0, int(by)-margin_y-top)
+        gx1, gy1 = min(gray.shape[1], int(bx+bw)+margin_x-left), min(gray.shape[0], int(by+bh)+margin_y-top)
     else:
-        allowance = round(ppm * (60 if damage_type == 'tear' else 25))
+        allowance = max(round(ppm * (60 if damage_type == 'tear' else 25)), round(seed_radius_px + offset_mm * ppm))
         gx0, gy0 = max(0, round(center_x)-allowance-left), max(0, round(center_y)-allowance-top)
         gx1, gy1 = min(gray.shape[1], round(center_x)+allowance-left+1), min(gray.shape[0], round(center_y)+allowance-top+1)
     growth[gy0:gy1, gx0:gx1] = 1
@@ -467,7 +495,8 @@ def trace_crack(result_dir, point, damage_type, offset_mm, tolerance=55, candida
         sy, sx = np.unravel_index(int(np.argmin(local)), local.shape)
     else:
         sx, sy = round(center_x)-left, round(center_y)-top
-    contour, selected, seed = _trace_dark_component(gray, valid, (sx, sy), int(tolerance), round(offset_mm*ppm))
+    contour, selected, seed = _trace_dark_component(gray, valid, (sx, sy), int(tolerance),
+                                                     round(offset_mm*ppm), seed_radius_px)
     contour = contour + [left, top]
     polygon = [[float(x), float(y)] for x, y in contour]
     # A contour can bridge a hole in the authored mask; never silently fill it.
@@ -478,14 +507,15 @@ def trace_crack(result_dir, point, damage_type, offset_mm, tolerance=55, candida
         raise ValueError('선택 경계가 지정되지 않은 영역을 가로지릅니다. 허용 범위나 여유를 줄여 주세요.')
     area_mm2 = round(_polygon_area(polygon) / ppm ** 2, 2)
     bx, by, bw, bh = cv2.boundingRect(contour.astype(np.int32))
-    if damage_type == 'tear' and area_mm2 / max(bw, bh) * ppm > 3.5:
-        raise ValueError('티어 선택이 주변 그림자까지 넓어졌습니다. 색상 허용 범위를 낮춰 주세요.')
+    wide_tear = damage_type == 'tear' and area_mm2 / max(bw, bh) * ppm > 3.5
     section_crop = cv2.resize(sections, (image_w, image_h), interpolation=cv2.INTER_NEAREST)[top:bottom, left:right]
     codes = section_crop[selected > 0]
     code = int(np.bincount(codes, minlength=len(data['sections'])+1)[1:].argmax() + 1)
     result = {'polygon': polygon, 'bbox': [float(bx), float(by), float(bw), float(bh)],
               'area_mm2': area_mm2, 'damage_type': damage_type, 'candidate_id': candidate_id,
-              'seed': [float(seed[0]+left), float(seed[1]+top)]}
+              'seed': [float(seed[0]+left), float(seed[1]+top)],
+              'warning': '티어로 보기에는 선택 폭이 넓습니다. 그림자 혼입 여부와 손상 유형을 확인해 주세요.'
+              if wide_tear else None}
     if not apply:
         return result
     if candidate is None:

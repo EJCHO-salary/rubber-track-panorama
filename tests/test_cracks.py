@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from track_unwrap import api
 from track_unwrap.cracks import (_dark_fissure_mask, _repeated_structure_support,
-                                 _trace_dark_component,
+                                 _repair_narrow_authored_seams, _trace_dark_component,
                                  _suggest_damage_type, add_manual_crack,
                                  delete_manual_crack, load_cracks, propose_cracks,
                                  review_crack, review_cracks, trace_crack)
@@ -133,6 +133,25 @@ def test_guided_selection_bridges_short_gap_without_neighbor_and_offsets_outline
     assert not selected[105, 70]
     expanded, _, _ = _trace_dark_component(gray, valid, (70, 70), 55, 4)
     assert cv2.contourArea(expanded) > cv2.contourArea(contour)
+    with pytest.raises(ValueError, match='검은 핵심부'):
+        _trace_dark_component(gray, valid, (10, 70), 55, 0)
+    _, _, snapped = _trace_dark_component(gray, valid, (10, 70), 55, 0, 35)
+    assert snapped[0] >= 33
+
+
+def test_guided_selection_crosses_thin_zone_seam_but_not_large_hole():
+    gray = np.full((130, 120), 155, np.uint8)
+    cv2.line(gray, (35, 12), (35, 115), 15, 4)
+    authored = np.ones_like(gray)
+    authored[61:68, :] = 0
+    authored[10:42, 70:105] = 0
+    _, before, _ = _trace_dark_component(gray, authored, (35, 25), 20, 0)
+    assert not before[95, 35]
+    repaired = _repair_narrow_authored_seams(authored, 5)
+    assert repaired[64, 35] and not repaired[25, 85]
+    _, after, _ = _trace_dark_component(gray, repaired, (35, 25), 20, 0)
+    assert after[95, 35]
+    assert not after[25, 85]
 
 
 def test_guided_preview_is_read_only_and_apply_adds_reviewable_candidate(tmp_path, monkeypatch):
@@ -183,6 +202,41 @@ def test_guided_click_rejects_dark_damage_outside_authored_zone(tmp_path):
     propose_cracks(tmp_path, 'geometry', 'normal')
     with pytest.raises(ValueError, match='지정된 영역'):
         trace_crack(tmp_path, [230, 70], 'chip_cut', 1.5, 30)
+
+
+def test_guided_wide_tear_is_previewed_with_warning_instead_of_blocked(tmp_path):
+    image = np.full((200, 300, 3), 155, np.uint8)
+    cv2.rectangle(image, (110, 60), (135, 110), (15, 15, 15), -1)
+    cv2.imwrite(str(tmp_path / 'panorama.png'), image)
+    (tmp_path / 'quality_report.json').write_text(json.dumps({
+        'settings': {'width_mm': 80, 'pitch_mm': 20, 'pixels_per_mm': 5},
+    }), encoding='utf-8')
+    _test_zones(tmp_path, [[0, 0], [299, 0], [299, 199], [0, 199]])
+    propose_cracks(tmp_path, 'geometry', 'normal')
+    with pytest.raises(ValueError, match='검은 핵심부'):
+        trace_crack(tmp_path, [75, 85], 'tear', .4, 30)
+    preview = trace_crack(tmp_path, [75, 85], 'tear', .4, 30, seed_radius_px=50)
+    assert preview['seed'][0] >= 110
+    assert preview['area_mm2'] > 0
+    assert '선택 폭이 넓습니다' in preview['warning']
+
+
+def test_guided_refinement_can_extend_beyond_old_candidate_box(tmp_path):
+    image = np.full((320, 320, 3), 155, np.uint8)
+    cv2.line(image, (100, 20), (100, 300), (15, 15, 15), 4)
+    cv2.imwrite(str(tmp_path / 'panorama.png'), image)
+    (tmp_path / 'quality_report.json').write_text(json.dumps({
+        'settings': {'width_mm': 80, 'pitch_mm': 20, 'pixels_per_mm': 5},
+    }), encoding='utf-8')
+    _test_zones(tmp_path, [[0, 0], [319, 0], [319, 319], [0, 319]])
+    review = propose_cracks(tmp_path, 'geometry', 'normal')
+    review['candidates'] = [{'id': 'truncated', 'status': 'pending', 'source': 'automatic',
+                             'section_id': 'surface', 'score': 1., 'contrast': 100.,
+                             'bbox': [94, 20, 13, 46],
+                             'polygon': [[94, 20], [106, 20], [106, 65], [94, 65]]}]
+    (tmp_path / 'cracks' / 'review.json').write_text(json.dumps(review), encoding='utf-8')
+    preview = trace_crack(tmp_path, None, 'tear', 0, 20, candidate_id='truncated')
+    assert preview['bbox'][1] + preview['bbox'][3] >= 295
 
 
 def test_reproposal_keeps_reviewed_candidate_and_manual_path(tmp_path):

@@ -36,8 +36,9 @@ export default function CrackWorkspace() {
   const [traceType, setTraceType] = useState<DamageType>('tear')
   const [traceOffset, setTraceOffset] = useState(.4)
   const [traceTolerance, setTraceTolerance] = useState(30)
+  const [traceSeedRadius, setTraceSeedRadius] = useState(18)
   const traceRequest: CrackTraceRequest = { point: tracePoint, candidate_id: traceCandidateId,
-    damage_type: traceType, offset_mm: traceOffset, tolerance: traceTolerance }
+    damage_type: traceType, offset_mm: traceOffset, tolerance: traceTolerance, seed_radius_px: traceSeedRadius }
   const [queuedTrace, setQueuedTrace] = useState<CrackTraceRequest | null>(null)
   useEffect(() => {
     if (!tracePoint && !traceCandidateId) { setQueuedTrace(null); return }
@@ -45,10 +46,11 @@ export default function CrackWorkspace() {
     return () => window.clearTimeout(timer)
     // Primitive inputs alone control the request; the object is recreated per render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tracePoint?.[0], tracePoint?.[1], traceCandidateId, traceType, traceOffset, traceTolerance])
+  }, [tracePoint?.[0], tracePoint?.[1], traceCandidateId, traceType, traceOffset, traceTolerance, traceSeedRadius])
   const currentPreview = Boolean(queuedTrace && queuedTrace.candidate_id === traceCandidateId &&
     queuedTrace.point?.[0] === tracePoint?.[0] && queuedTrace.point?.[1] === tracePoint?.[1] &&
-    queuedTrace.damage_type === traceType && queuedTrace.offset_mm === traceOffset && queuedTrace.tolerance === traceTolerance)
+    queuedTrace.damage_type === traceType && queuedTrace.offset_mm === traceOffset &&
+    queuedTrace.tolerance === traceTolerance && queuedTrace.seed_radius_px === traceSeedRadius)
   const tracePreview = useQuery({ queryKey: ['crack-trace', id, queuedTrace],
     queryFn: () => api.previewCrackTrace(id, queuedTrace!),
     enabled: Boolean(review.data?.ready && !review.data?.stale && queuedTrace), retry: false })
@@ -113,17 +115,17 @@ export default function CrackWorkspace() {
   function prepareTrace(candidate: CrackCandidate) {
     const mode = candidate.damage_type ?? candidate.suggested_damage_type ?? 'tear'
     setTraceType(mode); setTraceOffset(mode === 'tear' ? .4 : mode === 'chip_cut' ? 1.5 : 2.5)
-    setTraceTolerance(30); setTracePoint(null); setTraceCandidateId(candidate.id); setTracePicking(false)
+    setTraceTolerance(30); setTraceSeedRadius(18); setTracePoint(null); setTraceCandidateId(candidate.id); setTracePicking(false)
     setSelectedIds([candidate.id])
   }
-  function chooseTraceSeed(point: Point, candidateId: string | null) {
+  function chooseTraceSeed(point: Point, candidateId: string | null, seedRadiusPx: number) {
     const candidate = candidates.find(item => item.id === candidateId)
     if (candidate) {
       const mode = candidate.damage_type ?? candidate.suggested_damage_type ?? 'tear'
       setTraceType(mode); setTraceOffset(mode === 'tear' ? .4 : mode === 'chip_cut' ? 1.5 : 2.5)
       setSelectedIds([candidate.id])
     } else setSelectedIds([])
-    setTracePoint(point); setTraceCandidateId(candidateId)
+    setTracePoint(point); setTraceCandidateId(candidateId); setTraceSeedRadius(seedRadiusPx)
   }
   if (zones.isLoading || review.isLoading) return <div className={styles.loading}>크랙 검토 화면을 준비하고 있습니다…</div>
   if (!zones.data || !data) return <div className={styles.loading}>검토 데이터를 불러오지 못했습니다.</div>
@@ -144,7 +146,8 @@ export default function CrackWorkspace() {
         onDelete={index => setManualPoints(items => items.filter((_, i) => i !== index))}
         onClose={noop} onClosedMove={noop} onClosedDelete={noop} crackCandidates={drawing ? [] : filtered} selectedCrackIds={selectedIds}
         onCrackSelect={(candidateId, shift) => choose(candidateId, false, shift)} onCrackMarquee={drawing ? undefined : selectMarquee}
-        tracePicking={tracePicking} tracePolygon={currentPreview ? tracePreview.data?.polygon : null} onCrackSeed={chooseTraceSeed}
+        tracePicking={tracePicking} tracePolygon={currentPreview ? tracePreview.data?.polygon : null}
+        traceSeed={currentPreview ? tracePreview.data?.seed : null} onCrackSeed={chooseTraceSeed}
         hint={drawing ? '사진을 따라 점을 찍어 균열 경로를 그리세요 · 휠 확대 · 휠 버튼으로 이동' : tracePicking
           ? '검은 균열을 클릭해 선택 초안을 만드세요 · 휠 확대 · 휠 버튼 이동'
           : '드래그 선택 · Shift+드래그 추가 · 다시 선택하여 해제 · 휠 확대 · 휠 버튼 이동'} />
@@ -173,6 +176,7 @@ export default function CrackWorkspace() {
             {(!currentPreview || tracePreview.isFetching) && <small>사진에서 경계를 계산하고 있습니다…</small>}
             {currentPreview && tracePreview.isError && <small className={styles.traceError}>{(tracePreview.error as Error).message}</small>}
             {currentPreview && tracePreview.data && !tracePreview.isFetching && <><small>미리보기 면적 {tracePreview.data.area_mm2.toFixed(1)} mm² · {traceCandidateId ? '기존 후보 수정' : '새 후보 추가'}</small>
+              {tracePreview.data.warning && <small className={styles.traceWarning}>{tracePreview.data.warning}</small>}
               <button disabled={applyTrace.isPending} onClick={() => applyTrace.mutate(traceRequest)}><Check size={14} /> {applyTrace.isPending ? '적용 중…' : '이 경계 적용'}</button></>}
             <button className={styles.traceCancel} onClick={() => { setTracePoint(null); setTraceCandidateId(null); setTracePicking(false) }}>미리보기 취소</button>
           </div>}

@@ -7,7 +7,8 @@ from fastapi.testclient import TestClient
 
 from track_unwrap import api
 from track_unwrap.cracks import (_dark_fissure_mask, _repeated_structure_support,
-                                 _repair_narrow_authored_seams, _trace_dark_component,
+                                 _repair_narrow_authored_seams, _ridge_bridge,
+                                 _trace_dark_component,
                                  _suggest_damage_type, add_manual_crack,
                                  delete_manual_crack, load_cracks, propose_cracks,
                                  review_crack, review_cracks, trace_crack)
@@ -137,6 +138,32 @@ def test_guided_selection_bridges_short_gap_without_neighbor_and_offsets_outline
         _trace_dark_component(gray, valid, (10, 70), 55, 0)
     _, _, snapped = _trace_dark_component(gray, valid, (10, 70), 55, 0, 35)
     assert snapped[0] >= 33
+
+
+def test_shallow_offset_fissure_bridges_but_parallel_or_blank_regions_do_not():
+    gray = np.full((90, 135), 155, np.uint8)
+    response = np.zeros_like(gray)
+    valid = np.ones_like(gray)
+    cv2.line(gray, (15, 35), (50, 35), 18, 3)
+    cv2.line(gray, (72, 39), (110, 39), 18, 3)
+    cv2.line(gray, (50, 35), (72, 39), 125, 2)
+    cv2.line(response, (50, 35), (72, 39), 20, 2)
+    first = np.asarray([(x, 35) for x in range(15, 51)], np.int32)
+    second = np.asarray([(x, 39) for x in range(72, 111)], np.int32)
+    route = _ridge_bridge(gray, response, valid, first, second, 30)
+    assert route is not None
+    assert route[0, 0] == 50 and route[-1, 0] == 72
+    assert np.max(route[:, 1]) <= 41
+    response[:] = 0
+    assert _ridge_bridge(gray, response, valid, first, second, 30) is None
+    cv2.line(response, (50, 35), (72, 39), 20, 2)
+    valid[:, 61:64] = 0
+    assert _ridge_bridge(gray, response, valid, first, second, 30) is None
+
+    # A textured strip between adjacent parallel cracks is not continuation.
+    parallel = np.asarray([(55, y) for y in range(10, 61)], np.int32)
+    upright = np.asarray([(40, y) for y in range(10, 61)], np.int32)
+    assert _ridge_bridge(gray, response, np.ones_like(valid), upright, parallel, 30) is None
 
 
 def test_guided_selection_crosses_thin_zone_seam_but_not_large_hole():

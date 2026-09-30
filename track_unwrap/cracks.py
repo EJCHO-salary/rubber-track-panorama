@@ -4,6 +4,7 @@ These are image candidates, not diagnoses. Missing rubber (chips/chunks), depth,
 and steel exposure cannot be reliably inferred from this overhead image.
 """
 import json
+import heapq
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -232,6 +233,173 @@ def _inside_authored(candidate, authored, scale_x, scale_y):
     return bool(np.any(footprint) and np.all(authored[y:y+height, x:x+width][footprint > 0] > 0))
 
 
+def _ridge_bridge(gray, response, valid, first, second, max_gap):
+    """Trace a short, image-supported path between two dark crack fragments.
+
+    The black core may vanish in a shallow or reflective stretch. A low-cost
+    path must still follow a locally dark, high-contrast ridge inside the drawn
+    region; proximity alone never joins two components.
+    """
+    a = np.asarray(first, np.int32)
+    b = np.asarray(second, np.int32)
+    distances = np.sum((a[:, None, :] - b[None, :, :]) ** 2, axis=2)
+    ia, ib = np.unravel_index(int(np.argmin(distances)), distances.shape)
+    start, end = tuple(map(int, a[ia])), tuple(map(int, b[ib]))
+    gap = float(np.sqrt(distances[ia, ib]))
+    if gap < 2 or gap > max_gap:
+        return None
+    direction = (np.asarray(end) - start) / gap
+    # Prevent a short bridge between adjacent, parallel fissures. Their long
+    # axes run across the proposed connection rather than into it.
+    if gap >= 7:
+        for points in (a, b):
+            if len(points) < 5:
+                continue
+            local = points[np.sum((points - (start if points is a else end)) ** 2, axis=1) <= 15 ** 2]
+            if len(local) < 5:
+                continue
+            eigenvalues, eigenvectors = np.linalg.eigh(np.cov(local.T))
+            if eigenvalues[1] > eigenvalues[0] * 3 and abs(float(eigenvectors[:, 1] @ direction)) < .42:
+                return None
+    corridor = min(12, max(5, round(gap * .4)))
+    x0 = max(0, min(start[0], end[0]) - corridor - 1)
+    y0 = max(0, min(start[1], end[1]) - corridor - 1)
+    x1 = min(gray.shape[1], max(start[0], end[0]) + corridor + 2)
+    y1 = min(gray.shape[0], max(start[1], end[1]) + corridor + 2)
+    patch_gray = gray[y0:y1, x0:x1]
+    patch_response = response[y0:y1, x0:x1]
+    yy, xx = np.indices(patch_gray.shape)
+    cross = np.abs((xx + x0 - start[0]) * direction[1] -
+                   (yy + y0 - start[1]) * direction[0])
+    allowed = (valid[y0:y1, x0:x1] > 0) & (cross <= corridor)
+    start_local = (start[1] - y0, start[0] - x0)
+    end_local = (end[1] - y0, end[0] - x0)
+    if not allowed[start_local] or not allowed[end_local]:
+        return None
+    # Dijkstra on a small corridor: strongly prefer a dark relief line, yet
+    # allow a brief pale segment when both sides of the fissure continue.
+    height, width = patch_gray.shape
+    costs = np.full((height, width), np.inf, np.float32)
+    costs[start_local] = 0
+    previous = np.full((height, width), -1, np.int32)
+    queue = [(0., start_local[0], start_local[1])]
+    while queue:
+        distance, y, x = heapq.heappop(queue)
+        if distance > costs[y, x] + 1e-5:
+            continue
+        if (y, x) == end_local:
+            break
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if not (dx or dy):
+                    continue
+                ny, nx = y + dy, x + dx
+                if not (0 <= ny < height and 0 <= nx < width and allowed[ny, nx]):
+                    continue
+                contrast = float(patch_response[ny, nx])
+                shade = float(patch_gray[ny, nx])
+                step = (1.414 if dx and dy else 1.) * (
+                    1. + max(0., 25. - contrast) * .11 + max(0., shade - 145.) * .025)
+                candidate = distance + step
+                if candidate < costs[ny, nx]:
+                    costs[ny, nx] = candidate
+                    previous[ny, nx] = y * width + x
+                    heapq.heappush(queue, (candidate, ny, nx))
+    if not np.isfinite(costs[end_local]):
+        return None
+    path = []
+    y, x = end_local
+    while (y, x) != start_local:
+        path.append((x + x0, y + y0))
+        parent = int(previous[y, x])
+        if parent < 0:
+            return None
+        y, x = divmod(parent, width)
+    path.append(start)
+    path.reverse()
+    if len(path) > gap * 1.65 + 3:
+        return None
+    route = np.asarray(path, np.int32)
+    shades = gray[route[:, 1], route[:, 0]]
+    ridges = response[route[:, 1], route[:, 0]]
+    if (np.mean((ridges >= 8) & (shades <= 185)) < .68 or
+            np.mean(ridges >= 16) < .38 or np.median(shades) > 170):
+        return None
+    return route
+
+
+def _merge_continuous_candidates(candidates, gray, response, authored,
+                                 scale_x, scale_y, pixels_per_mm):
+    """Join detected pieces of one fissure without moving across blank rubber."""
+    if len(candidates) < 2:
+        return candidates
+    valid = _repair_narrow_authored_seams(authored, pixels_per_mm / max(scale_x, scale_y))
+    outlines = [np.rint(np.asarray(item['polygon']) / [scale_x, scale_y]).astype(np.int32)
+                for item in candidates]
+    parent = list(range(len(candidates)))
+    bridges = []
+
+    def root(index):
+        while parent[index] != index:
+            index = parent[index]
+        return index
+
+    max_gap = min(36, max(7, round(pixels_per_mm * 22 / max(scale_x, scale_y))))
+    for i, first in enumerate(candidates):
+        for j in range(i + 1, len(candidates)):
+            second = candidates[j]
+            ax, ay, aw, ah = first['bbox']
+            bx, by, bw, bh = second['bbox']
+            physical_gap = max(0, bx - ax - aw, ax - bx - bw,
+                               by - ay - ah, ay - by - bh)
+            if physical_gap > max_gap * max(scale_x, scale_y):
+                continue
+            route = _ridge_bridge(gray, response, valid, outlines[i], outlines[j], max_gap)
+            if route is not None:
+                parent[root(j)] = root(i)
+                bridges.append((i, j, route))
+    groups = {}
+    for i in range(len(candidates)):
+        groups.setdefault(root(i), []).append(i)
+    merged = []
+    for members in groups.values():
+        if len(members) == 1:
+            merged.append(candidates[members[0]])
+            continue
+        all_points = np.vstack([outlines[i] for i in members])
+        x0, y0 = np.maximum(np.min(all_points, axis=0) - 3, 0)
+        x1, y1 = np.minimum(np.max(all_points, axis=0) + 4, gray.shape[::-1])
+        footprint = np.zeros((y1-y0, x1-x0), np.uint8)
+        for i in members:
+            cv2.fillPoly(footprint, [outlines[i] - [x0, y0]], 1)
+        for i, j, route in bridges:
+            if root(i) == root(members[0]) and root(j) == root(members[0]):
+                cv2.polylines(footprint, [route - [x0, y0]], False, 1, 2)
+        footprint[valid[y0:y1, x0:x1] == 0] = 0
+        contours, _ = cv2.findContours(footprint, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            merged.extend(candidates[i] for i in members)
+            continue
+        contour = max(contours, key=cv2.contourArea)
+        if len(contours) != 1:
+            # A missing bridge or a truly separate crack must not be silently
+            # represented by a single polygon that discards smaller pieces.
+            merged.extend(candidates[i] for i in members)
+            continue
+        contour = cv2.approxPolyDP(contour, .8, True).reshape(-1, 2) + [x0, y0]
+        polygon = [[round(float(px) * scale_x, 1), round(float(py) * scale_y, 1)]
+                   for px, py in contour]
+        bx, by, bw, bh = cv2.boundingRect(contour)
+        source = max((candidates[i] for i in members), key=lambda item: item['area_mm2'])
+        merged.append(dict(source, id=uuid4().hex[:12],
+                           polygon=polygon, bbox=[round(bx*scale_x, 1), round(by*scale_y, 1),
+                                                  round(bw*scale_x, 1), round(bh*scale_y, 1)],
+                           area_mm2=round(_polygon_area(polygon) / pixels_per_mm**2, 2),
+                           length_mm=round(max(bw*scale_x, bh*scale_y) / pixels_per_mm, 1),
+                           connected_fragments=len(members)))
+    return merged
+
+
 def propose_cracks(result_dir, group_id, sensitivity='normal'):
     """Regenerate dark-core candidates while retaining explicit human review."""
     if sensitivity not in {'low', 'normal', 'high'}:
@@ -327,6 +495,9 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
                            'length_mm': round(length_mm, 1), 'contrast': round(contrast, 1), 'score': score,
                            'area_mm2': area_mm2,
                            'bbox': [round(x*scale_x, 1), round(y*scale_y, 1), round(bw*scale_x, 1), round(bh*scale_y, 1)]})
+    candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
+    candidates = _merge_continuous_candidates(candidates[:400], gray, response, authored,
+                                               scale_x, scale_y, ppm)
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = candidates[:400]
     if previous and previous.get('group_id') == group_id and previous.get('zone_created_at') == zones['created_at']:

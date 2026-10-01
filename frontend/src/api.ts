@@ -51,6 +51,9 @@ export const api = {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points, closed, candidate_id: candidateId }),
   }),
   deleteCrack: (id: string, candidateId: string) => request<CrackReview>(`/api/jobs/${id}/cracks/${candidateId}`, { method: 'DELETE' }),
+  deleteCracks: (id: string, candidate_ids: string[]) => request<CrackReview>(`/api/jobs/${id}/cracks/delete-batch`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidate_ids }),
+  }),
 }
 
 export function fileBase(jobId: string) { return `/api/jobs/${jobId}/files` }

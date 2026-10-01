@@ -4,6 +4,7 @@ import { Maximize2, Minus, Plus } from 'lucide-react'
 import type { CrackCandidate, Point, ZoneAnalysis, ZoneInstance, ZoneShape } from '../types'
 import { fileBase, zoneFileBase } from '../api'
 import { placeStrokeControls, strokeCloses } from '../stroke'
+import { polygonIntersectsRect } from '../crackSelection'
 import styles from '../pages/ZoneWorkspace.module.css'
 
 type Props = {
@@ -25,7 +26,7 @@ type Props = {
   crackCandidates?: CrackCandidate[]
   selectedCrackIds?: string[]
   onCrackSelect?: (id: string, shift: boolean, screen: Point, point: Point) => void
-  onCrackMarquee?: (ids: string[], shift: boolean) => void
+  onCrackMarquee?: (ids: string[], shift: boolean, bounds: [number, number, number, number]) => void
   onCrackRegion?: (region: [number, number, number, number], screen: Point) => void
   onCrackEmpty?: (point: Point, screen: Point) => void
   tracePicking?: boolean
@@ -206,7 +207,7 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     if (!start || start.id !== event.pointerId) return
     const end = overlayPoint(event)
     const dragged = Math.hypot(end[0] - start.point[0], end[1] - start.point[1]) > 4
-    suppressCrackClick.current = dragged
+    suppressCrackClick.current = true
     if (tracePicking) {
       if (Math.hypot(end[0] - start.point[0], end[1] - start.point[1]) <= 4) {
         const point = unproject(event)
@@ -219,12 +220,14 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     } else if (dragged) {
       const bounds = [Math.min(start.point[0], end[0]), Math.min(start.point[1], end[1]),
         Math.max(start.point[0], end[0]), Math.max(start.point[1], end[1])]
-      const ids = crackCandidates.filter(item => {
-        const [x, y, width, height] = item.bbox
-        const a = project([x, y]), b = project([x + width, y + height])
-        return a[0] <= bounds[2] && b[0] >= bounds[0] && a[1] <= bounds[3] && b[1] >= bounds[1]
-      }).map(item => item.id)
-      onCrackMarquee?.(ids, start.shift)
+      const first = unprojectScreen([bounds[0], bounds[1]])
+      const last = unprojectScreen([bounds[2], bounds[3]])
+      const imageBounds: [number, number, number, number] | null = first && last
+        ? [first[0], first[1], last[0], last[1]] : null
+      const ids = imageBounds ? crackCandidates.filter(item => polygonIntersectsRect(item.polygon, imageBounds)).map(item => item.id) : []
+      const screen = overlayRef.current!.getBoundingClientRect()
+      onCrackMarquee?.(ids, start.shift, [bounds[0] + screen.left, bounds[1] + screen.top,
+        bounds[2] + screen.left, bounds[3] + screen.top])
     } else if (start.candidateId) {
       const point = unproject(event)
       if (point) onCrackSelect?.(start.candidateId, start.shift, [event.clientX, event.clientY], point)
@@ -232,7 +235,7 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     else if (!start.shift) {
       const point = unproject(event)
       if (point && onCrackEmpty) onCrackEmpty(point, [event.clientX, event.clientY])
-      else onCrackMarquee?.([], false)
+      else onCrackMarquee?.([], false, [event.clientX, event.clientY, event.clientX, event.clientY])
     }
     selectionStart.current = null
     setSelectionEnd(null)

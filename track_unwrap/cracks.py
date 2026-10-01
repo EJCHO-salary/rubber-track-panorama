@@ -1328,13 +1328,19 @@ def delete_manual_crack(result_dir, candidate_id):
 
 def delete_crack(result_dir, candidate_id):
     """Remove a review candidate and remember the rejection on reproposal."""
+    return delete_cracks(result_dir, [candidate_id])
+
+
+def delete_cracks(result_dir, candidate_ids):
+    """Atomically remove selected candidates while retaining reproposal suppression."""
     data = load_cracks(result_dir)
     if not data:
         raise ValueError('크랙 후보를 찾을 수 없습니다.')
-    candidate = next((item for item in data['candidates'] if item['id'] == candidate_id), None)
-    if not candidate:
+    ids = set(candidate_ids)
+    if not ids or ids - {item['id'] for item in data['candidates']}:
         raise ValueError('크랙 후보를 찾을 수 없습니다.')
-    data.setdefault('dismissed_candidates', []).append({
-        'id': candidate['id'], 'bbox': candidate['bbox'], 'polygon': candidate['polygon']})
-    data['candidates'] = [item for item in data['candidates'] if item['id'] != candidate_id]
+    removed = [item for item in data['candidates'] if item['id'] in ids]
+    data.setdefault('dismissed_candidates', []).extend({
+        'id': item['id'], 'bbox': item['bbox'], 'polygon': item['polygon']} for item in removed)
+    data['candidates'] = [item for item in data['candidates'] if item['id'] not in ids]
     return _write(result_dir, _summary(data))

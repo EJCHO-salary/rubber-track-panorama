@@ -15,7 +15,7 @@ from track_unwrap.cracks import (_anomaly_candidates, _dark_fissure_mask,
                                  _repair_narrow_authored_seams, _ridge_bridge,
                                  _trace_dark_component,
                                  _suggest_damage_type, add_manual_crack,
-                                 delete_crack, delete_manual_crack, load_cracks, propose_cracks,
+                                 delete_crack, delete_cracks, delete_manual_crack, load_cracks, propose_cracks,
                                  review_crack, review_cracks, trace_crack)
 from track_unwrap.zones import build_zones
 
@@ -461,6 +461,26 @@ def test_deleted_automatic_candidate_stays_removed_after_reproposal(tmp_path):
     assert target['id'] not in {item['id'] for item in deleted['candidates']}
     again = propose_cracks(tmp_path, 'geometry', 'high')
     assert not any(abs(item['bbox'][0] - target['bbox'][0]) < 10 for item in again['candidates'])
+
+
+def test_batch_delete_is_atomic_and_remembers_each_candidate(tmp_path):
+    image = np.full((180, 400, 3), 150, np.uint8)
+    cv2.imwrite(str(tmp_path / 'panorama.png'), image)
+    (tmp_path / 'quality_report.json').write_text(json.dumps({
+        'settings': {'width_mm': 80, 'pitch_mm': 20, 'pixels_per_mm': 2.5},
+    }), encoding='utf-8')
+    _test_zones(tmp_path, [[0, 0], [399, 0], [399, 179], [0, 179]])
+    propose_cracks(tmp_path, 'geometry', 'low')
+    add_manual_crack(tmp_path, [[50, 30], [51, 80], [52, 120]])
+    second = add_manual_crack(tmp_path, [[250, 30], [251, 80], [252, 120]])
+    ids = [item['id'] for item in second['candidates']]
+    assert len(ids) == 2
+    with pytest.raises(ValueError, match='찾을 수 없습니다'):
+        delete_cracks(tmp_path, [ids[0], 'missing'])
+    assert {item['id'] for item in load_cracks(tmp_path)['candidates']} == set(ids)
+    deleted = delete_cracks(tmp_path, ids)
+    assert deleted['candidates'] == []
+    assert {item['id'] for item in deleted['dismissed_candidates']} == set(ids)
 
 
 def test_reproposal_keeps_reviewed_candidate_and_manual_path(tmp_path):

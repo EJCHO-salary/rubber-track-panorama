@@ -39,3 +39,9 @@
 .traceModes{display:grid;grid-template-columns:1fr 1fr;gap:6px}.traceModes span,.traceModes button{display:flex;align-items:center;justify-content:center;gap:5px;border:1px solid #cde0d3;border-radius:7px;padding:9px 5px;font-size:10px;font-weight:800}.traceModes span{background:#eaf5ee;color:#27704a}.traceModes button{background:#fff;color:#286849;cursor:pointer}.traceModes button:hover{background:#f1f9f3}
 @media(max-width:1050px){.layout{grid-template-columns:1fr}.sidePanel{display:grid;grid-template-columns:1fr 1fr;align-items:start}.sideTitle,.sideNote{grid-column:1/-1}.viewerArea>div{height:65vh;min-height:470px}}
 @media(max-width:680px){.canvasHeading{display:grid}.imageTools{justify-content:flex-start}.settingsBar{align-items:stretch}.sidePanel{grid-template-columns:1fr}.viewerArea>div{height:58vh;min-height:390px}.imagePopup{width:min(312px,calc(100vw - 32px))}}
+.bulkPopup{position:fixed;z-index:51;width:240px;padding:13px;background:#fff;border:1px solid #9bbfcd;border-radius:10px;box-shadow:0 14px 36px #143b4240;display:grid;gap:11px;color:#244d58}
+.bulkPopup strong{font-size:13px}
+.bulkPopup>div{display:flex;gap:7px}
+.bulkPopup button{flex:1;display:flex;align-items:center;justify-content:center;gap:4px;border:1px solid #d6e3e4;background:#fff;color:#48666a;border-radius:6px;padding:8px 4px;font-size:11px;font-weight:800;white-space:nowrap}
+.bulkPopup button:last-child{border-color:#c97268;background:#af5147;color:#fff}
+.bulkPopup button:disabled{opacity:.55}

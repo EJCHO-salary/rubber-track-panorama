@@ -18,7 +18,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, StrictInt
 
 from .zones import assist_polygon, build_zones, list_zone_instances, load_zones, suggest_half_turn
-from .cracks import (add_manual_crack, clear_cracks, delete_crack,
+from .cracks import (add_manual_crack, clear_cracks, delete_crack, delete_cracks,
                      load_cracks, propose_cracks, review_crack, review_cracks,
                      trace_crack)
 from .pipeline import Settings, unwrap
@@ -263,6 +263,10 @@ class CrackReview(BaseModel):
 class CrackBatchReview(CrackReview):
     candidate_ids: list[str]
     auto_larger: bool = False
+
+
+class CrackBatchDelete(BaseModel):
+    candidate_ids: list[str]
 
 
 class ManualCrack(BaseModel):
@@ -587,6 +591,16 @@ def delete_job_crack(job_id: str, candidate_id: str):
     with _zone_lock(job_id):
         try:
             return {**delete_crack(result_dir, candidate_id), 'ready': True, 'stale': False}
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+
+@app.post('/api/jobs/{job_id}/cracks/delete-batch')
+def delete_job_cracks_batch(job_id: str, request: CrackBatchDelete):
+    result_dir = _zones_dir(job_id)
+    with _zone_lock(job_id):
+        try:
+            return {**delete_cracks(result_dir, request.candidate_ids), 'ready': True, 'stale': False}
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 

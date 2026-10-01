@@ -5,6 +5,7 @@ import { Link, useParams } from 'react-router'
 import { api, formatNumber } from '../api'
 import type { CrackCandidate, CrackReview, CrackTraceRequest, Point } from '../types'
 import ZoneCanvas from '../components/ZoneCanvas'
+import { toggleSelection } from '../crackSelection'
 import styles from './CrackWorkspace.module.css'
 
 const noop = () => {}
@@ -26,6 +27,8 @@ export default function CrackWorkspace() {
   const [showSettings, setShowSettings] = useState(false)
   const [showZones, setShowZones] = useState(false)
   const [popup, setPopup] = useState<Popup | null>(null)
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [selectionBounds, setSelectionBounds] = useState<[number, number, number, number] | null>(null)
   const [drawing, setDrawing] = useState(false)
   const [drawingCandidateId, setDrawingCandidateId] = useState<string | null>(null)
   const [manualPoints, setManualPoints] = useState<Point[]>([])
@@ -82,6 +85,14 @@ export default function CrackWorkspace() {
     onSuccess: data => { save(data); setPopup(null); setNotice('후보를 삭제했습니다. 다시 찾기를 눌러도 같은 위치에 재생성되지 않습니다.') },
     onError: (cause: Error) => setError(cause.message),
   })
+  const removeMany = useMutation({
+    mutationFn: (candidateIds: string[]) => api.deleteCracks(id, candidateIds),
+    onSuccess: data => {
+      save(data); setSelectedIds([]); setSelectionBounds(null)
+      setNotice('선택한 후보를 삭제했습니다. 다시 찾기를 눌러도 같은 위치에 재생성되지 않습니다.')
+    },
+    onError: (cause: Error) => setError(cause.message),
+  })
   const applyTrace = useMutation({
     mutationFn: (request: CrackTraceRequest) => api.applyCrackTrace(id, request),
     onSuccess: data => {
@@ -102,11 +113,13 @@ export default function CrackWorkspace() {
   })
 
   function openCandidate(candidateId: string, screen: Point) {
+    setSelectedIds([]); setSelectionBounds(null)
     setDrawing(false); setTraceRegion(null); setTracePoint(null)
     setPopup({ kind: 'candidate', candidateId, screen })
   }
   function openTrace(point: Point | null, region: [number, number, number, number] | null,
                      candidateId: string | null, screen: Point) {
+    setSelectedIds([]); setSelectionBounds(null)
     const item = review.data?.candidates?.find(entry => entry.id === candidateId)
     const kind = item?.damage_type ?? item?.suggested_damage_type ?? 'tear'
     setTraceType(kind)
@@ -116,6 +129,7 @@ export default function CrackWorkspace() {
     setPopup({ kind: 'trace', candidateId, screen })
   }
   function startDrawing(candidateId: string | null = null) {
+    setSelectedIds([]); setSelectionBounds(null)
     setDrawing(true); setDrawingCandidateId(candidateId); setManualPoints([]); setManualClosed(false)
     setPopup(null); setError('')
   }
@@ -125,19 +139,42 @@ export default function CrackWorkspace() {
   }
   function clearAll() {
     if (!window.confirm('이 작업의 모든 후보와 판정 기록을 삭제할까요? 원본 사진과 영역 지도는 유지됩니다.')) return
-    api.clearCracks(id).then(data => { save(data); setPopup(null); setShowSettings(false) })
+    api.clearCracks(id).then(data => { save(data); setPopup(null); setSelectedIds([]); setSelectionBounds(null); setShowSettings(false) })
       .catch((cause: Error) => setError(cause.message))
   }
+
+  function selectCandidates(ids: string[], shift: boolean, bounds: [number, number, number, number]) {
+    setPopup(null)
+    setSelectedIds(current => toggleSelection(current, ids, shift))
+    setSelectionBounds(bounds)
+  }
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!selectedIds.length || event.altKey || event.ctrlKey || event.metaKey ||
+          (event.target instanceof HTMLElement && event.target.closest('input, textarea, select, [contenteditable="true"]'))) return
+      if (event.key === 'Escape') { setSelectedIds([]); setSelectionBounds(null) }
+      if (event.key === 'Delete' && !removeMany.isPending) {
+        event.preventDefault()
+        removeMany.mutate(selectedIds)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [selectedIds, removeMany.isPending, removeMany.mutate])
 
   if (zones.isLoading || review.isLoading) return <div className={styles.loading}>검토 화면을 준비하고 있습니다…</div>
   if (!zones.data || !review.data) return <div className={styles.loading}>검토 데이터를 불러오지 못했습니다.</div>
   const data = review.data, candidates = data.candidates ?? []
   const currentGroup = zones.data.groups.find(item => item.id === data.group_id) ?? zones.data.groups[0]
-  const selectedIds = popup?.candidateId ? [popup.candidateId] : []
+  const highlightedIds = selectedIds.length ? selectedIds : popup?.candidateId ? [popup.candidateId] : []
+  const bulkLeft = selectionBounds ? (selectionBounds[2] + 252 < window.innerWidth
+    ? selectionBounds[2] + 12 : Math.max(12, selectionBounds[0] - 252)) : 0
+  const bulkTop = selectionBounds ? Math.max(12, Math.min(selectionBounds[1], window.innerHeight - 125)) : 0
   const popupLeft = popup ? Math.max(16, Math.min(popup.screen[0] + 16, window.innerWidth - 328)) : 0
   const popupHeight = popup?.kind === 'trace' ? Math.min(window.innerHeight * .78, 540) : 400
   const popupTop = popup ? Math.max(16, Math.min(popup.screen[1] + 12, window.innerHeight - popupHeight - 16)) : 0
-  const busy = decision.isPending || remove.isPending || applyTrace.isPending || proposal.isPending
+  const busy = decision.isPending || remove.isPending || removeMany.isPending || applyTrace.isPending || proposal.isPending
   const autoCount = candidates.filter(item => item.decision_source === 'auto' && item.status === 'accepted').length
   const editedCount = candidates.filter(item => item.decision_source === 'manual' && item.status === 'accepted').length
   const drawnArea = manualClosed && manualPoints.length >= 3
@@ -157,7 +194,7 @@ export default function CrackWorkspace() {
     <div className={styles.layout}>
       <section className={styles.canvasPanel}>
         <div className={styles.canvasHeading}>
-          <div><strong>전개 사진</strong><small>후보 클릭: 수정·삭제 · 빈 곳 클릭: 자동 선택·직접 그리기 · 휠 확대 · 휠 버튼 이동</small></div>
+          <div><strong>전개 사진</strong><small>후보 클릭: 수정 · 드래그: 복수 선택 · Shift+클릭/드래그: 추가·해제 · Del: 삭제 · 빈 곳 클릭: 균열 추출</small></div>
           <div className={styles.imageTools}>
             <label><input type="checkbox" checked={showZones} onChange={event => setShowZones(event.target.checked)} /> 영역</label>
             {drawing && <button type="button" onClick={stopDrawing}><X size={14} /> 그리기 취소</button>}
@@ -199,14 +236,17 @@ export default function CrackWorkspace() {
             onMoveStart={noop} onMove={(index, point) => setManualPoints(items => items.map((item, i) => i === index ? point : item))}
             onSelect={noop} onDelete={index => setManualPoints(items => items.filter((_, i) => i !== index))}
             onClose={noop} onClosedMove={noop} onClosedDelete={noop}
-            crackCandidates={drawing ? [] : candidates} selectedCrackIds={selectedIds}
-            onCrackSelect={(candidateId, _shift, screen) => openCandidate(candidateId, screen)}
-            onCrackRegion={drawing ? undefined : (region, screen) => openTrace(null, region, null, screen)}
+            crackCandidates={drawing ? [] : candidates} selectedCrackIds={highlightedIds}
+            onCrackSelect={(candidateId, shift, screen) => {
+              if (shift) selectCandidates([candidateId], true, [screen[0], screen[1], screen[0], screen[1]])
+              else openCandidate(candidateId, screen)
+            }}
+            onCrackMarquee={drawing ? undefined : selectCandidates}
             onCrackEmpty={drawing ? undefined : (point, screen) => openTrace(point, null, null, screen)}
             tracePolygon={currentPreview && !preview.isFetching ? preview.data?.polygon : null}
             traceSeed={currentPreview && !preview.isFetching ? preview.data?.seed : null}
             hint={drawing ? '마우스로 손상을 그리세요 · 시작점 근처에서 마치면 닫힌 경계로 인식합니다'
-              : '후보 클릭 · 빈 사진 클릭 후 자동 선택 또는 직접 그리기 · 휠 확대 · 휠 버튼 이동'} />
+              : '드래그 복수 선택 · Shift로 추가·해제 · Del 삭제 · 빈 사진 클릭: 균열 추출 · 휠 확대 · 휠 버튼 이동'} />
         </div>
       </section>
       <aside className={styles.sidePanel}>
@@ -217,6 +257,16 @@ export default function CrackWorkspace() {
         <p className={styles.sideNote}>후보는 사진 판독을 돕는 초안입니다. 검은 홈·그림자와 실제 고무 균열은 사진을 보며 구분해 주세요.</p>
       </aside>
     </div>
+    {selectedIds.length > 0 && <div className={styles.bulkPopup} style={{ left: bulkLeft, top: bulkTop }}
+      role="dialog" aria-label="선택한 균열 일괄 삭제">
+      <strong>{selectedIds.length}개 균열 선택</strong>
+      <div>
+        <button type="button" onClick={() => { setSelectedIds([]); setSelectionBounds(null) }} disabled={removeMany.isPending}>취소</button>
+        <button type="button" onClick={() => removeMany.mutate(selectedIds)} disabled={removeMany.isPending}>
+          <Trash2 size={14} /> {removeMany.isPending ? '삭제 중…' : '삭제 · Del'}
+        </button>
+      </div>
+    </div>}
     {popup && <div className={styles.imagePopup} style={{ left: popupLeft, top: popupTop }} role="dialog" aria-label={popup.kind === 'candidate' ? '균열 후보 판정' : '균열 추출'}>
       <div className={styles.popupHeader}><div><span>{popup.kind === 'candidate' ? 'SELECTED REGION' : 'IMAGE SELECTION'}</span><strong>{popup.kind === 'candidate' ? '이 영역 판정' : popup.candidateId ? '균열 경계 수정' : '새 균열 추출'}</strong></div>
         <button onClick={() => setPopup(null)} aria-label="팝업 닫기"><X size={17} /></button></div>

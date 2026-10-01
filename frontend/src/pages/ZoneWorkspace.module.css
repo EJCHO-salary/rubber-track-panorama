@@ -39,3 +39,6 @@
 .crackAreaAccepted[data-mode=chunk]{fill:#d4685266;stroke:#ef916e}.crackAreaAccepted[data-mode=chip_cut]{fill:#dca63d5c;stroke:#f1c362}.crackAreaAccepted[data-mode=tear]{fill:#22aa6970;stroke:#57e39b}
 .crackTracePreview{fill:#16a6ef63;stroke:#087fc4;stroke-width:2.5;vector-effect:non-scaling-stroke;pointer-events:none}
 .crackTraceSeed{fill:#fff;stroke:#087fc4;stroke-width:2.5;vector-effect:non-scaling-stroke;pointer-events:none}
+.freehandConfirmation{position:absolute;z-index:8;box-sizing:border-box;display:grid;gap:5px;padding:11px 12px;border:1px solid #b6d7c4;border-radius:10px;background:#fff;box-shadow:0 12px 32px #071b1580;color:#244c36;pointer-events:auto}
+.freehandConfirmation strong{font-size:12px;line-height:1.25}.freehandConfirmation span{font-size:10px;color:#64816e;line-height:1.35}.freehandConfirmation small{font-size:9px;color:#aa4e40;line-height:1.35}
+.freehandConfirmation>div{display:flex;justify-content:flex-end;gap:6px;margin-top:3px}.freehandConfirmation button{border:1px solid #d2e3d8;border-radius:6px;background:#fff;color:#477055;padding:6px 10px;font-size:10px;font-weight:800;cursor:pointer}.freehandConfirmation button:last-child{border-color:#1c7050;background:#1c7050;color:#fff}.freehandConfirmation button:disabled{opacity:.5;cursor:not-allowed}

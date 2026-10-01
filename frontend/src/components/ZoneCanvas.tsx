@@ -3,7 +3,7 @@ import OpenSeadragon from 'openseadragon'
 import { Maximize2, Minus, Plus } from 'lucide-react'
 import type { CrackCandidate, Point, ZoneAnalysis, ZoneInstance, ZoneShape } from '../types'
 import { fileBase, zoneFileBase } from '../api'
-import { strokeCloses } from '../stroke'
+import { placeStrokeControls, strokeCloses } from '../stroke'
 import styles from '../pages/ZoneWorkspace.module.css'
 
 type Props = {
@@ -34,6 +34,15 @@ type Props = {
   onCrackSeed?: (point: Point, candidateId: string | null, seedRadiusPx: number) => void
   freehand?: boolean
   onFreehandComplete?: (points: Point[], closed: boolean) => void
+  freehandConfirmation?: {
+    label: string
+    detail: string
+    disabled: boolean
+    saving: boolean
+    error?: string
+    onSave: () => void
+    onCancel: () => void
+  }
   hint?: string
   onAdd: (point: Point) => void
   onInsert: (index: number, point: Point) => void
@@ -50,7 +59,7 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
   focusShape, suggestedPolygon, segmentInstances, adjustingSegments, selectedSegment, onSegmentSelect, onSegmentMove,
   crackCandidates = [], selectedCrackIds = [], onCrackSelect, onCrackMarquee, onCrackRegion, onCrackEmpty,
   tracePicking = false, tracePolygon, traceSeed, onCrackSeed,
-  freehand = false, onFreehandComplete, hint,
+  freehand = false, onFreehandComplete, freehandConfirmation, hint,
   onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete, onClose, onClosedMove, onClosedDelete }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<SVGSVGElement>(null)
@@ -349,6 +358,11 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
       const screen = project([x, 0])[0]
       return screen >= -30 && screen <= size.width + 30
     }) : []
+  const showFreehandConfirmation = Boolean(freehand && freehandConfirmation &&
+    points.length >= 2 && freehandPreview.length === 0 && ready)
+  const confirmationWidth = Math.min(244, size.width - 24)
+  const confirmationPosition = showFreehandConfirmation ? placeStrokeControls(
+    points.map(project), size, { width: confirmationWidth, height: freehandConfirmation?.error ? 126 : 96 }) : null
 
   return <div className={styles.canvasShell} onPointerDownCapture={startMiddlePan}
     onPointerMove={moveMiddlePan} onPointerUp={endMiddlePan} onPointerCancel={endMiddlePan}
@@ -462,6 +476,21 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
           onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onDelete(index) }} />
       })}
     </svg>}
+    {showFreehandConfirmation && confirmationPosition && freehandConfirmation &&
+      <div className={styles.freehandConfirmation}
+        style={{ left: confirmationPosition[0], top: confirmationPosition[1], width: confirmationWidth }}
+        role="group" aria-label="그린 손상 저장">
+        <strong>{freehandConfirmation.label}</strong>
+        <span>{freehandConfirmation.detail}</span>
+        {freehandConfirmation.error && <small role="alert">{freehandConfirmation.error}</small>}
+        <div>
+          <button type="button" onClick={freehandConfirmation.onCancel} disabled={freehandConfirmation.saving}>취소</button>
+          <button type="button" onClick={freehandConfirmation.onSave}
+            disabled={freehandConfirmation.disabled || freehandConfirmation.saving}>
+            {freehandConfirmation.saving ? '저장 중…' : '저장·집계'}
+          </button>
+        </div>
+      </div>}
     <div className={styles.zoomControls}><button onClick={() => viewer.current?.viewport.zoomBy(1.4)} aria-label="확대"><Plus size={17} /></button>
       <button onClick={() => viewer.current?.viewport.zoomBy(1/1.4)} aria-label="축소"><Minus size={17} /></button>
       <button onClick={() => viewer.current?.viewport.goHome()} aria-label="전체 보기"><Maximize2 size={17} /></button></div>

@@ -95,9 +95,7 @@ export default function CrackWorkspace() {
   const manual = useMutation({
     mutationFn: () => api.addManualCrack(id, manualPoints, manualClosed, drawingCandidateId),
     onSuccess: data => {
-      const savedId = drawingCandidateId ?? data.candidates?.[0]?.id ?? null
-      save(data); setDrawing(false); setDrawingCandidateId(null); setManualPoints([]); setManualClosed(false)
-      setPopup(savedId ? { kind: 'candidate', candidateId: savedId, screen: [window.innerWidth / 2, 360] } : null)
+      save(data); stopDrawing(); setPopup(null)
       setNotice('그린 손상을 저장하고 선 모양과 면적에 따라 분류·집계했습니다.')
     },
     onError: (cause: Error) => setError(cause.message),
@@ -121,6 +119,10 @@ export default function CrackWorkspace() {
     setDrawing(true); setDrawingCandidateId(candidateId); setManualPoints([]); setManualClosed(false)
     setPopup(null); setError('')
   }
+  function stopDrawing() {
+    setDrawing(false); setDrawingCandidateId(null); setManualPoints([]); setManualClosed(false)
+    setError('')
+  }
   function clearAll() {
     if (!window.confirm('이 작업의 모든 후보와 판정 기록을 삭제할까요? 원본 사진과 영역 지도는 유지됩니다.')) return
     api.clearCracks(id).then(data => { save(data); setPopup(null); setShowSettings(false) })
@@ -133,7 +135,8 @@ export default function CrackWorkspace() {
   const currentGroup = zones.data.groups.find(item => item.id === data.group_id) ?? zones.data.groups[0]
   const selectedIds = popup?.candidateId ? [popup.candidateId] : []
   const popupLeft = popup ? Math.max(16, Math.min(popup.screen[0] + 16, window.innerWidth - 328)) : 0
-  const popupTop = popup ? Math.max(16, Math.min(popup.screen[1] + 12, window.innerHeight - 470)) : 0
+  const popupHeight = popup?.kind === 'trace' ? Math.min(window.innerHeight * .78, 540) : 400
+  const popupTop = popup ? Math.max(16, Math.min(popup.screen[1] + 12, window.innerHeight - popupHeight - 16)) : 0
   const busy = decision.isPending || remove.isPending || applyTrace.isPending || proposal.isPending
   const autoCount = candidates.filter(item => item.decision_source === 'auto' && item.status === 'accepted').length
   const editedCount = candidates.filter(item => item.decision_source === 'manual' && item.status === 'accepted').length
@@ -154,11 +157,11 @@ export default function CrackWorkspace() {
     <div className={styles.layout}>
       <section className={styles.canvasPanel}>
         <div className={styles.canvasHeading}>
-          <div><strong>전개 사진</strong><small>후보 클릭: 수정·삭제 · 빈 곳 클릭/드래그: 균열 추출 · 휠 확대 · 휠 버튼 이동</small></div>
+          <div><strong>전개 사진</strong><small>후보 클릭: 수정·삭제 · 빈 곳 클릭: 자동 선택·직접 그리기 · 휠 확대 · 휠 버튼 이동</small></div>
           <div className={styles.imageTools}>
             <label><input type="checkbox" checked={showZones} onChange={event => setShowZones(event.target.checked)} /> 영역</label>
-            <button type="button" className={drawing ? styles.toolActive : ''} onClick={() => drawing ? setDrawing(false) : startDrawing()}><PenLine size={14} /> 직접 검출</button>
-            <button type="button" className={showSettings ? styles.toolActive : ''} onClick={() => setShowSettings(value => !value)}><Settings2 size={14} /> 검출 설정</button>
+            {drawing && <button type="button" onClick={stopDrawing}><X size={14} /> 그리기 취소</button>}
+            <button type="button" className={showSettings ? styles.toolActive : ''} onClick={() => setShowSettings(value => !value)}><Settings2 size={14} /> 자동 탐색 설정</button>
           </div>
         </div>
         <div className={styles.topLegend} aria-label="손상 유형 색상 범례">
@@ -174,11 +177,22 @@ export default function CrackWorkspace() {
           <button onClick={() => proposal.mutate()} disabled={busy}><ScanSearch size={14} /> {proposal.isPending ? '탐색 중…' : '후보 다시 찾기'}</button>
           <button className={styles.clearAll} onClick={clearAll} disabled={busy}><Trash2 size={14} /> 전체 초기화</button>
         </div>}
-        {data.stale && <div className={styles.stale}>영역 지도가 변경되었습니다. 검출 설정에서 후보를 다시 찾아 주세요.</div>}
+        {data.stale && <div className={styles.stale}>영역 지도가 변경되었습니다. 자동 탐색 설정에서 후보를 다시 찾아 주세요.</div>}
         <div className={styles.viewerArea}>
           <ZoneCanvas jobId={id} groupId={currentGroup?.id ?? null} analysis={zones.data} editing={Boolean(drawing)}
             points={manualPoints} closedShapes={[]} selectedVertex={null} opacity={showZones ? .27 : 0}
-            freehand={drawing} onFreehandComplete={(points, closed) => { setManualPoints(points); setManualClosed(closed) }}
+            freehand={drawing} onFreehandComplete={(points, closed) => {
+              setManualPoints(points); setManualClosed(closed); setError('')
+            }}
+            freehandConfirmation={drawing && manualPoints.length >= 2 ? {
+              label: drawingCandidateId ? '윤곽 수정' : '새 손상',
+              detail: manualClosed ? `${drawnArea.toFixed(1)} mm² · ${drawnArea >= 100 ? '청크' : '칩앤컷'} 제안`
+                : '열린 선 · 티어 제안',
+              disabled: (manualClosed && drawnArea < .5) || manual.isPending,
+              saving: manual.isPending,
+              error: error || undefined,
+              onSave: () => manual.mutate(), onCancel: stopDrawing,
+            } : undefined}
             focusShape={null} suggestedPolygon={null} segmentInstances={[]} adjustingSegments={false} selectedSegment={null}
             onSegmentSelect={noop} onSegmentMove={noop} onAdd={noop}
             onInsert={(index, point) => setManualPoints(items => [...items.slice(0, index), point, ...items.slice(index)])}
@@ -192,11 +206,8 @@ export default function CrackWorkspace() {
             tracePolygon={currentPreview && !preview.isFetching ? preview.data?.polygon : null}
             traceSeed={currentPreview && !preview.isFetching ? preview.data?.seed : null}
             hint={drawing ? '마우스로 손상을 그리세요 · 시작점 근처에서 마치면 닫힌 경계로 인식합니다'
-              : '후보 클릭 · 놓친 균열 드래그 · 휠 확대 · 휠 버튼 이동'} />
+              : '후보 클릭 · 빈 사진 클릭 후 자동 선택 또는 직접 그리기 · 휠 확대 · 휠 버튼 이동'} />
         </div>
-        {drawing && <div className={styles.drawBar}><span>{drawingCandidateId ? '윤곽 수정 · ' : '새 손상 · '}{manualPoints.length ? `${manualPoints.length}점 · ${manualClosed ? `${drawnArea.toFixed(1)} mm² · ${drawnArea >= 100 ? '청크' : '칩앤컷'} 제안` : '열린 선 · 티어 제안'}` : '열린 선은 티어 · 시작점 근처에서 닫으면 면적별 분류'}</span>
-          <button onClick={() => { setDrawing(false); setDrawingCandidateId(null); setManualPoints([]); setManualClosed(false) }}>취소</button>
-          <button disabled={manualPoints.length < (manualClosed ? 3 : 2) || (manualClosed && drawnArea < .5) || manual.isPending} onClick={() => manual.mutate()}><Check size={14} /> 저장·집계</button></div>}
       </section>
       <aside className={styles.sidePanel}>
         <div className={styles.sideTitle}><span>LIVE SUMMARY</span><strong>손상 집계</strong><small>자동 분류는 초안이며 이미지에서 바로 수정할 수 있습니다.</small></div>
@@ -222,7 +233,11 @@ export default function CrackWorkspace() {
         </div>
       </>}
       {popup.kind === 'trace' && <>
-        <p className={styles.popupHelp}>파란색 미리보기를 확인하고 유형과 경계를 조정하세요.</p>
+        <p className={styles.popupHelp}>검은 영역의 자동 선택을 확인하거나, 사진 위에 손상을 직접 그리세요.</p>
+        <div className={styles.traceModes}>
+          <span><ScanSearch size={14} /> 자동 윤곽 선택</span>
+          <button type="button" onClick={() => startDrawing(popup.candidateId)}><PenLine size={14} /> 직접 그리기</button>
+        </div>
         <div className={styles.popupTypes}>{damageTypes.map(type => <button key={type.id} className={traceType === type.id ? styles.typeActive : ''} onClick={() => { setTraceType(type.id); setTraceOffset(type.id === 'tear' ? .4 : type.id === 'chip_cut' ? 1.5 : 2.5) }}>{type.label}</button>)}</div>
         <label className={styles.popupSlider}>검은색 허용 범위 <b>{traceTolerance}</b><input type="range" min="15" max="100" step="5" value={traceTolerance} onChange={event => setTraceTolerance(Number(event.target.value))} /></label>
         <label className={styles.popupSlider}>경계 여유 <b>{traceOffset.toFixed(1)} mm</b><input type="range" min="0" max="5" step="0.1" value={traceOffset} onChange={event => setTraceOffset(Number(event.target.value))} /></label>
@@ -231,7 +246,6 @@ export default function CrackWorkspace() {
         {currentPreview && preview.data && !preview.isFetching && <p className={styles.popupMeta}>미리보기 {preview.data.area_mm2.toFixed(1)} mm²{preview.data.warning ? ' · 경계를 확인해 주세요' : ''}</p>}
         <button className={styles.popupPrimary} disabled={!currentPreview || !preview.data || preview.isFetching || applyTrace.isPending}
           onClick={() => applyTrace.mutate(traceRequest)}><Check size={15} /> {applyTrace.isPending ? '저장 중…' : '이 영역 채택·저장'}</button>
-        <div className={styles.popupActions}><button onClick={() => startDrawing(popup.candidateId)}><PenLine size={14} /> 직접 그리기</button></div>
       </>}
     </div>}
   </div>

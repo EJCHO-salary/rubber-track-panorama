@@ -36,6 +36,15 @@ def _automatic_tear_outside_range(item, minimum_mm, maximum_mm):
                  or maximum_mm is not None and item.get('length_mm', 0) > maximum_mm))
 
 
+def _automatic_chunk_below_minimum(item, minimum_mm2):
+    """Do not count undersized automatic loss, including compact dark pits."""
+    return (item.get('source') == 'automatic'
+            and item.get('decision_source') != 'manual'
+            and item.get('status') != 'excluded'
+            and item.get('damage_type') == 'chunk'
+            and item.get('area_mm2', 0) < minimum_mm2)
+
+
 def load_cracks(result_dir):
     _, path = _paths(result_dir)
     if not path.is_file():
@@ -43,6 +52,7 @@ def load_cracks(result_dir):
     data = json.loads(path.read_text(encoding='utf-8'))
     tear_min_mm = data.get('tear_min_length_mm', TEAR_MIN_LENGTH_MM)
     tear_max_mm = data.get('tear_max_length_mm')
+    chunk_min_mm2 = data.get('chunk_min_area_mm2', CHUNK_MIN_AREA_MM2)
     ppm = data.get('pixels_per_mm')
     if not ppm:
         zones = load_zones(result_dir)
@@ -78,18 +88,17 @@ def load_cracks(result_dir):
             candidate.update(status='accepted', damage_type=suggestion,
                              suggested_damage_type=suggestion, suggestion_reason=reason,
                              decision_source='manual' if candidate['source'] == 'manual' else 'auto')
-    # Unconfirmed automatic compact marks were generated from colour changes,
-    # including chalk and lighting. A user-drawn or explicitly reviewed mark
-    # is always retained, even when smaller than the automatic size threshold.
+    # Apply the saved physical limits to every unreviewed automatic proposal.
+    # Explicit user decisions remain even when below the automatic thresholds.
     data['candidates'] = [item for item in data.get('candidates', [])
                           if not _automatic_tear_outside_range(item, tear_min_mm, tear_max_mm)
+                          and not _automatic_chunk_below_minimum(item, chunk_min_mm2)
                           and not (item.get('source') == 'automatic'
                                   and item.get('decision_source') != 'manual'
                                   and item.get('status') != 'excluded'
                                   and (item.get('detection_basis') == 'material_change'
                                        or item.get('suggested_damage_type') == 'chunk'
-                                       and (item.get('status') == 'pending'
-                                            or item.get('area_mm2', 0) < CHUNK_MIN_AREA_MM2)
+                                       and item.get('status') == 'pending'
                                        and item.get('detection_basis') != 'compact_dark_loss'))]
     data['version'] = 2
     return _summary(data)
@@ -117,7 +126,7 @@ def _write(result_dir, data):
 
 
 def _summary(data):
-    data['chunk_min_area_mm2'] = CHUNK_MIN_AREA_MM2
+    data.setdefault('chunk_min_area_mm2', CHUNK_MIN_AREA_MM2)
     data.setdefault('tear_min_length_mm', TEAR_MIN_LENGTH_MM)
     data.setdefault('tear_max_length_mm', None)
     sections = {item['id']: {'proposed': 0, 'accepted': 0, 'excluded': 0,
@@ -1020,7 +1029,8 @@ def _directional_tear_extensions(candidates, gray, response, authored, repeated,
 
 
 def propose_cracks(result_dir, group_id, sensitivity='normal',
-                   tear_min_length_mm=TEAR_MIN_LENGTH_MM, tear_max_length_mm=None):
+                   tear_min_length_mm=TEAR_MIN_LENGTH_MM, tear_max_length_mm=None,
+                   chunk_min_area_mm2=CHUNK_MIN_AREA_MM2):
     """Regenerate dark-core candidates while retaining explicit human review."""
     if sensitivity not in {'low', 'normal', 'high'}:
         raise ValueError('민감도는 low, normal, high 중 하나여야 합니다.')
@@ -1030,6 +1040,8 @@ def propose_cracks(result_dir, group_id, sensitivity='normal',
             and (not math.isfinite(tear_max_length_mm)
                  or tear_max_length_mm < tear_min_length_mm)):
         raise ValueError('티어 길이 상한은 하한 이상이어야 합니다.')
+    if not math.isfinite(chunk_min_area_mm2) or chunk_min_area_mm2 < 0:
+        raise ValueError('청크 최소 면적은 0 cm² 이상이어야 합니다.')
     zones = load_zones(result_dir)
     if not zones:
         raise ValueError('먼저 영역을 지정해 주세요.')
@@ -1134,7 +1146,7 @@ def propose_cracks(result_dir, group_id, sensitivity='normal',
         item['damage_type'] = item['suggested_damage_type'] = suggestion
         item['suggestion_reason'] = reason
     candidates = [item for item in candidates
-                  if item['damage_type'] != 'chunk' or item['area_mm2'] >= CHUNK_MIN_AREA_MM2]
+                  if item['damage_type'] != 'chunk' or item['area_mm2'] >= chunk_min_area_mm2]
     anomaly = _periodic_dark_anomaly(gray, zones['pitch_anchors_x'], scale_x)
     anomalous = _anomaly_candidates(gray, raw_response, anomaly, mask, authored, group,
                                     scale_x, scale_y, ppm, core_limit, sensitivity,
@@ -1142,7 +1154,7 @@ def propose_cracks(result_dir, group_id, sensitivity='normal',
     candidates.extend(_filter_recurrent_anomalies(
         anomalous, zones['pitch_anchors_x'], zones['pitch_px'], original.shape[0], sensitivity))
     candidates = [item for item in candidates
-                  if item['damage_type'] != 'chunk' or item['area_mm2'] >= CHUNK_MIN_AREA_MM2]
+                  if item['damage_type'] != 'chunk' or item['area_mm2'] >= chunk_min_area_mm2]
     fine = _fine_dark_candidates(original, authored, mask, zones, group,
                                  candidates, sensitivity)
     candidates.extend(fine)
@@ -1153,7 +1165,7 @@ def propose_cracks(result_dir, group_id, sensitivity='normal',
                   if not _is_sprocket_relief(item, hole_band, anchor_positions,
                                              pitch_spacing, scale_x, scale_y, h)
                   and not (item['suggested_damage_type'] == 'chunk'
-                           and item['area_mm2'] < CHUNK_MIN_AREA_MM2
+                           and item['area_mm2'] < chunk_min_area_mm2
                            and item.get('detection_basis') != 'compact_dark_loss')
                   and (item['area_mm2'] < 10 or
                        _black_core_fraction(original, item, core_limit) >= .20)
@@ -1177,8 +1189,9 @@ def propose_cracks(result_dir, group_id, sensitivity='normal',
                                                scale_x, scale_y, ppm))
     # Join adjacent fissure fragments first, then enforce the physical length
     # threshold on the resulting automatic candidates.
-    candidates = [item for item in candidates if not _automatic_tear_outside_range(
-        item, tear_min_length_mm, tear_max_length_mm)]
+    candidates = [item for item in candidates
+                  if not _automatic_tear_outside_range(item, tear_min_length_mm, tear_max_length_mm)
+                  and not _automatic_chunk_below_minimum(item, chunk_min_area_mm2)]
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = candidates[:400]
     if previous and previous.get('group_id') == group_id and previous.get('zone_created_at') == zones['created_at']:
@@ -1211,6 +1224,7 @@ def propose_cracks(result_dir, group_id, sensitivity='normal',
             'pixels_per_mm': ppm,
             'tear_min_length_mm': tear_min_length_mm,
             'tear_max_length_mm': tear_max_length_mm,
+            'chunk_min_area_mm2': chunk_min_area_mm2,
             'sections': [{'id': section['id'], 'name': section['name'], 'color': section['color']} for section in group['sections']],
             'candidates': candidates, 'dismissed_candidates': dismissed}
     return _write(result_dir, _summary(data))

@@ -161,7 +161,8 @@ def test_batch_classification_and_area_rule_preserve_explicit_decisions(tmp_path
                 'bbox': [0, 0, 4, 4], 'area_mm2': area, 'length_mm': 4, 'score': .5,
                 'status': status, 'source': source}
     review = {'version': 2, 'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866'}],
-              'pixels_per_mm': 1, 'candidates': [candidate('reference', 10), candidate('bigger', 15),
+              'pixels_per_mm': 1, 'chunk_min_area_mm2': 10,
+              'candidates': [candidate('reference', 10), candidate('bigger', 15),
                 candidate('smaller', 9), candidate('ruled_out', 20, 'excluded'),
                 candidate('manual', 25, 'accepted', 'manual')]}
     (folder / 'review.json').write_text(json.dumps(review), encoding='utf-8')
@@ -342,7 +343,7 @@ def test_small_automatic_loss_is_removed_and_legacy_manual_decision_survives(tmp
     assert migrated['accepted_area_by_type'] == {'chunk': 64, 'tear': 64}
 
 
-def test_verified_small_dark_loss_survives_review_reload(tmp_path):
+def test_small_dark_loss_respects_chunk_limit_unless_reviewed(tmp_path):
     folder = tmp_path / 'cracks'
     folder.mkdir()
     candidate = {'id': 'small_pit', 'section_id': 'surface',
@@ -352,11 +353,17 @@ def test_verified_small_dark_loss_survives_review_reload(tmp_path):
                  'damage_type': 'chunk', 'suggested_damage_type': 'chunk',
                  'decision_source': 'auto', 'detection_basis': 'compact_dark_loss'}
     review = {'version': 2, 'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866'}],
-              'pixels_per_mm': 2.5, 'candidates': [candidate]}
+              'pixels_per_mm': 2.5,
+              'candidates': [candidate, dict(candidate, id='reviewed', decision_source='manual')]}
     (folder / 'review.json').write_text(json.dumps(review), encoding='utf-8')
     loaded = load_cracks(tmp_path)
     assert loaded['accepted_by_type']['chunk'] == 1
-    assert loaded['candidates'][0]['id'] == 'small_pit'
+    assert loaded['candidates'][0]['id'] == 'reviewed'
+    review['chunk_min_area_mm2'] = 10
+    (folder / 'review.json').write_text(json.dumps(review), encoding='utf-8')
+    relaxed = load_cracks(tmp_path)
+    assert relaxed['accepted_by_type']['chunk'] == 2
+    assert relaxed['chunk_min_area_mm2'] == 10
 
 
 def test_automatic_tears_below_one_centimeter_are_not_counted(tmp_path):
@@ -404,6 +411,8 @@ def test_tear_length_range_validation_is_applied_before_detection(tmp_path):
         propose_cracks(tmp_path, 'geometry', tear_min_length_mm=-1)
     with pytest.raises(ValueError, match='상한'):
         propose_cracks(tmp_path, 'geometry', tear_min_length_mm=10, tear_max_length_mm=9.9)
+    with pytest.raises(ValueError, match='청크'):
+        propose_cracks(tmp_path, 'geometry', chunk_min_area_mm2=-1)
 
 
 def test_chalk_colour_change_does_not_produce_automatic_chunk(tmp_path):
@@ -738,13 +747,17 @@ def test_clear_all_candidates_then_repropose_from_current_detector(tmp_path, mon
 
         fresh = client.post(f'/api/jobs/{job_id}/cracks/propose', json={
             'group_id': 'geometry', 'sensitivity': 'high',
-            'tear_min_length_mm': 5, 'tear_max_length_mm': 100}).json()
+            'tear_min_length_mm': 5, 'tear_max_length_mm': 100,
+            'chunk_min_area_mm2': 50}).json()
         assert fresh['candidates']
         assert (fresh['tear_min_length_mm'], fresh['tear_max_length_mm']) == (5, 100)
+        assert fresh['chunk_min_area_mm2'] == 50
         assert fresh['totals']['excluded'] == 0 and fresh['totals']['accepted'] > 0
         assert all(item['status'] == 'accepted' and item['damage_type'] for item in fresh['candidates'])
         assert all(5 <= item['length_mm'] <= 100 for item in fresh['candidates']
                    if item['source'] == 'automatic' and item['damage_type'] == 'tear')
+        assert all(item['area_mm2'] >= 50 for item in fresh['candidates']
+                   if item['source'] == 'automatic' and item['damage_type'] == 'chunk')
 
 
 def test_only_drawn_area_produces_crack_candidates(tmp_path):

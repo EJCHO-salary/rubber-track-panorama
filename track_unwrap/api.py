@@ -255,6 +255,7 @@ class CrackProposal(BaseModel):
     sensitivity: str = 'normal'
     tear_min_length_mm: float = 10.
     tear_max_length_mm: float | None = None
+    chunk_min_area_mm2: float = 100.
 
 
 class CrackReview(BaseModel):
@@ -517,7 +518,8 @@ def propose_job_cracks(job_id: str, request: CrackProposal):
     with _zone_lock(job_id):
         try:
             return {**propose_cracks(result_dir, request.group_id, request.sensitivity,
-                                     request.tear_min_length_mm, request.tear_max_length_mm),
+                                     request.tear_min_length_mm, request.tear_max_length_mm,
+                                     request.chunk_min_area_mm2),
                     'ready': True, 'stale': False}
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc

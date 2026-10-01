@@ -33,9 +33,10 @@ export const api = {
   cracks: (id: string) => request<CrackReview>(`/api/jobs/${id}/cracks`),
   clearCracks: (id: string) => request<CrackReview>(`/api/jobs/${id}/cracks`, { method: 'DELETE' }),
   proposeCracks: (id: string, group_id: string, sensitivity: 'low' | 'normal' | 'high',
-                  tear_min_length_mm: number, tear_max_length_mm: number | null) => request<CrackReview>(`/api/jobs/${id}/cracks/propose`, {
+                  tear_min_length_mm: number, tear_max_length_mm: number | null,
+                  chunk_min_area_mm2: number) => request<CrackReview>(`/api/jobs/${id}/cracks/propose`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_id, sensitivity, tear_min_length_mm, tear_max_length_mm }),
+    body: JSON.stringify({ group_id, sensitivity, tear_min_length_mm, tear_max_length_mm, chunk_min_area_mm2 }),
   }),
   previewCrackTrace: (id: string, trace: CrackTraceRequest) => request<CrackTracePreview>(`/api/jobs/${id}/cracks/trace`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(trace),

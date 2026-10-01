@@ -12,7 +12,6 @@ const noop = () => {}
 const damageTypes = [
   { id: 'chunk', label: '청크' },
   { id: 'tear', label: '티어' },
-  { id: 'chip_cut', label: '칩앤컷' },
 ] as const
 type DamageType = NonNullable<CrackCandidate['damage_type']>
 type Popup = { kind: 'candidate' | 'trace'; screen: Point; candidateId: string | null }
@@ -123,7 +122,7 @@ export default function CrackWorkspace() {
     const item = review.data?.candidates?.find(entry => entry.id === candidateId)
     const kind = item?.damage_type ?? item?.suggested_damage_type ?? 'tear'
     setTraceType(kind)
-    setTraceOffset(kind === 'tear' ? .4 : kind === 'chip_cut' ? 1.5 : 2.5)
+    setTraceOffset(kind === 'tear' ? .4 : 2.5)
     setTraceTolerance(30); setTracePoint(point); setTraceRegion(region)
     setDrawing(false)
     setPopup({ kind: 'trace', candidateId, screen })
@@ -205,7 +204,7 @@ export default function CrackWorkspace() {
           <strong>표시 색상</strong>
           <span><i className={styles.chunkDot} /> 청크</span>
           <span><i className={styles.acceptedDot} /> 티어</span>
-          <span><i className={styles.chipDot} /> 칩앤컷</span>
+          <span><i className={styles.pendingDot} /> 검토 필요</span>
           <span><i className={styles.selectionDot} /> 선택 중</span>
         </div>
         {showSettings && <div className={styles.settingsBar}>
@@ -223,7 +222,7 @@ export default function CrackWorkspace() {
             }}
             freehandConfirmation={drawing && manualPoints.length >= 2 ? {
               label: drawingCandidateId ? '윤곽 수정' : '새 손상',
-              detail: manualClosed ? `${drawnArea.toFixed(1)} mm² · ${drawnArea >= 100 ? '청크' : '칩앤컷'} 제안`
+              detail: manualClosed ? `${drawnArea.toFixed(1)} mm² · 청크${drawnArea < (data.chunk_min_area_mm2 ?? 100) ? ' (기준 미만 수동 지정)' : ''}`
                 : '열린 선 · 티어 제안',
               disabled: (manualClosed && drawnArea < .5) || manual.isPending,
               saving: manual.isPending,
@@ -252,6 +251,7 @@ export default function CrackWorkspace() {
       <aside className={styles.sidePanel}>
         <div className={styles.sideTitle}><span>LIVE SUMMARY</span><strong>손상 집계</strong><small>자동 분류는 초안이며 이미지에서 바로 수정할 수 있습니다.</small></div>
         <div className={styles.stats}><div><strong>{formatNumber(data.totals?.accepted ?? 0)}</strong><small>집계</small></div><div><strong>{formatNumber(autoCount)}</strong><small>자동 분류</small></div><div><strong>{formatNumber(editedCount)}</strong><small>사용자 수정</small></div></div>
+        {(data.totals?.proposed ?? 0) > 0 && <p className={styles.pendingNote}>{formatNumber(data.totals!.proposed)}개 후보가 검토를 기다립니다. 자동으로 찾은 1 cm² 미만 덩어리형 손상은 채택 전까지 집계하지 않습니다.</p>}
         <div className={styles.typeCounts}><strong>손상 유형</strong>{damageTypes.map(item => <div key={item.id}><span>{item.label}</span><b>{data.accepted_by_type?.[item.id] ?? 0}</b></div>)}</div>
         <div className={styles.sectionCounts}><strong>영역별 집계</strong>{data.sections?.map(section => <div key={section.id}><span><i style={{ background: section.color }} />{section.name}</span><small title="후보별 표시 면적 합계입니다. 겹친 윤곽은 중복될 수 있습니다.">{data.summary?.[section.id]?.accepted ?? 0}건 · {formatNumber(data.summary?.[section.id]?.area_mm2 ?? 0)} mm²</small></div>)}</div>
         <p className={styles.sideNote}>후보는 사진 판독을 돕는 초안입니다. 검은 홈·그림자와 실제 고무 균열은 사진을 보며 구분해 주세요.</p>
@@ -271,7 +271,7 @@ export default function CrackWorkspace() {
       <div className={styles.popupHeader}><div><span>{popup.kind === 'candidate' ? 'SELECTED REGION' : 'IMAGE SELECTION'}</span><strong>{popup.kind === 'candidate' ? '이 영역 판정' : popup.candidateId ? '균열 경계 수정' : '새 균열 추출'}</strong></div>
         <button onClick={() => setPopup(null)} aria-label="팝업 닫기"><X size={17} /></button></div>
       {popup.kind === 'candidate' && candidate && <>
-        <p className={styles.popupMeta}>{data.sections?.find(item => item.id === candidate.section_id)?.name} · {candidate.area_mm2?.toFixed(1)} mm² · {candidate.decision_source === 'auto' ? '자동 분류' : '사용자 수정'}</p>
+        <p className={styles.popupMeta}>{data.sections?.find(item => item.id === candidate.section_id)?.name} · {candidate.area_mm2?.toFixed(1)} mm² · {candidate.status === 'pending' ? '검토 필요' : candidate.decision_source === 'auto' ? '자동 분류' : '사용자 수정'}</p>
         <p className={styles.popupHelp}>{candidate.suggestion_reason ?? '유형을 누르면 집계가 즉시 수정됩니다.'}</p>
         <div className={styles.popupTypes}>{damageTypes.map(type => <button key={type.id} disabled={busy}
           className={candidate.status === 'accepted' && candidate.damage_type === type.id ? styles.typeActive : ''}
@@ -288,7 +288,7 @@ export default function CrackWorkspace() {
           <span><ScanSearch size={14} /> 자동 윤곽 선택</span>
           <button type="button" onClick={() => startDrawing(popup.candidateId)}><PenLine size={14} /> 직접 그리기</button>
         </div>
-        <div className={styles.popupTypes}>{damageTypes.map(type => <button key={type.id} className={traceType === type.id ? styles.typeActive : ''} onClick={() => { setTraceType(type.id); setTraceOffset(type.id === 'tear' ? .4 : type.id === 'chip_cut' ? 1.5 : 2.5) }}>{type.label}</button>)}</div>
+        <div className={styles.popupTypes}>{damageTypes.map(type => <button key={type.id} className={traceType === type.id ? styles.typeActive : ''} onClick={() => { setTraceType(type.id); setTraceOffset(type.id === 'tear' ? .4 : 2.5) }}>{type.label}</button>)}</div>
         <label className={styles.popupSlider}>검은색 허용 범위 <b>{traceTolerance}</b><input type="range" min="15" max="100" step="5" value={traceTolerance} onChange={event => setTraceTolerance(Number(event.target.value))} /></label>
         <label className={styles.popupSlider}>경계 여유 <b>{traceOffset.toFixed(1)} mm</b><input type="range" min="0" max="5" step="0.1" value={traceOffset} onChange={event => setTraceOffset(Number(event.target.value))} /></label>
         {(!currentPreview || preview.isFetching) && <p className={styles.popupHelp}>검은 연결 영역을 분석하고 있습니다…</p>}

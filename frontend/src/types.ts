@@ -122,9 +122,9 @@ export interface CrackCandidate {
   bbox: [number, number, number, number]
   status: 'pending' | 'accepted' | 'excluded'
   source: 'automatic' | 'manual'
-  damage_type?: 'chunk' | 'tear' | 'chip_cut' | null
+  damage_type?: 'chunk' | 'tear' | null
   decision_source?: 'manual' | 'auto' | null
-  suggested_damage_type?: 'chunk' | 'tear' | 'chip_cut' | null
+  suggested_damage_type?: 'chunk' | 'tear' | null
   suggestion_reason?: string | null
   repeated_structure_score?: number | null
   detection_basis?: 'dark_core' | 'pitch_dark_anomaly' | 'fine_dark_core' | 'material_change'
@@ -138,7 +138,7 @@ export interface CrackTraceRequest {
   point: Point | null
   region?: [number, number, number, number] | null
   candidate_id: string | null
-  damage_type: 'chunk' | 'tear' | 'chip_cut'
+  damage_type: 'chunk' | 'tear'
   offset_mm: number
   tolerance: number
   seed_radius_px: number
@@ -166,6 +166,7 @@ export interface CrackReview {
   candidates?: CrackCandidate[]
   summary?: Record<string, { proposed: number; accepted: number; excluded: number; length_mm: number; area_mm2: number }>
   totals?: { proposed: number; accepted: number; excluded: number; length_mm: number; area_mm2: number }
-  accepted_by_type?: Record<'chunk' | 'tear' | 'chip_cut' | 'unclassified', number>
+  accepted_by_type?: Record<'chunk' | 'tear' | 'unclassified', number>
+  chunk_min_area_mm2?: number
   last_review?: { selected: number; auto_accepted: number }
 }

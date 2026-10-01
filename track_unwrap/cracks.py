@@ -14,7 +14,8 @@ import numpy as np
 from .zones import load_zones
 
 
-DAMAGE_TYPES = {'chunk', 'tear', 'chip_cut'}
+DAMAGE_TYPES = {'chunk', 'tear'}
+CHUNK_MIN_AREA_MM2 = 100.  # 1 cm² in calibrated panorama coordinates.
 
 
 def _paths(result_dir):
@@ -31,6 +32,7 @@ def load_cracks(result_dir):
     if not ppm:
         zones = load_zones(result_dir)
         ppm = float(zones['nominal_pixels_per_mm']) if zones else 1.
+    legacy = data.get('version', 1) < 2
     for candidate in data.get('candidates', []):
         candidate.setdefault('damage_type', None)
         candidate.setdefault('suggested_damage_type', None)
@@ -38,9 +40,24 @@ def load_cracks(result_dir):
         candidate.setdefault('decision_source', 'manual' if candidate['status'] != 'pending' else None)
         candidate.setdefault('area_mm2', _polygon_area(candidate['polygon']) / ppm ** 2)
         candidate.setdefault('length_mm', max(candidate['bbox'][2:]) / ppm)
+        # Retire the old small-loss class without erasing user decisions.
+        # Automatically accepted sub-threshold loss remains visible for review.
+        old_chip = candidate.get('damage_type') == 'chip_cut' or candidate.get('suggested_damage_type') == 'chip_cut'
+        if old_chip:
+            previous_type = candidate.get('damage_type')
+            candidate['suggested_damage_type'] = 'chunk'
+            candidate['suggestion_reason'] = ('덩어리형 손상 후보입니다. 1 cm² 미만이어서 집계 전 확인이 필요합니다.'
+                                              if candidate['area_mm2'] < CHUNK_MIN_AREA_MM2 else
+                                              '덩어리형 손상이며 검출 면적이 1 cm² 이상입니다.')
+            if candidate['status'] == 'accepted' and candidate['decision_source'] != 'manual' and candidate['area_mm2'] < CHUNK_MIN_AREA_MM2:
+                candidate.update(status='pending', damage_type=None, decision_source=None)
+            elif candidate['status'] == 'accepted':
+                candidate['damage_type'] = previous_type if candidate['decision_source'] == 'manual' and previous_type in DAMAGE_TYPES else 'chunk'
+            else:
+                candidate['damage_type'] = None
         # Older review files stored proposals and guided selections as pending.
         # Both now participate in the tally without requiring a second click.
-        if candidate['status'] == 'pending':
+        if legacy and candidate['status'] == 'pending' and not old_chip:
             box = candidate['bbox']
             suggestion, reason = (candidate.get('damage_type') or candidate.get('suggested_damage_type'),
                                   candidate.get('suggestion_reason'))
@@ -51,6 +68,7 @@ def load_cracks(result_dir):
             candidate.update(status='accepted', damage_type=suggestion,
                              suggested_damage_type=suggestion, suggestion_reason=reason,
                              decision_source='manual' if candidate['source'] == 'manual' else 'auto')
+    data['version'] = 2
     return _summary(data)
 
 
@@ -76,6 +94,7 @@ def _write(result_dir, data):
 
 
 def _summary(data):
+    data['chunk_min_area_mm2'] = CHUNK_MIN_AREA_MM2
     sections = {item['id']: {'proposed': 0, 'accepted': 0, 'excluded': 0,
                              'length_mm': 0., 'area_mm2': 0.}
                 for item in data['sections']}
@@ -226,33 +245,30 @@ def _bright_rim_fraction(gray, labels, label, x, y, width, height):
 
 
 def _suggest_damage_type(area_mm2, length_mm, elongation, bright_rim):
-    """Suggest a visual class; 1 cm² is a project convention, not a material standard.
-
-    A long narrow fissure remains a tear even when its traced area is large.
-    Only compact apparent material loss is split by the local area threshold.
-    """
+    """Distinguish thin tears from compact loss; size controls automatic counting."""
     width_mm = area_mm2 / max(length_mm, .1)
     if length_mm >= 8 and width_mm <= 2.5 and elongation >= 2.2:
         return 'tear', '면적과 관계없이 길고 좁게 이어진 균열 형태입니다.'
-    if area_mm2 >= 100:
+    if area_mm2 >= CHUNK_MIN_AREA_MM2:
         return 'chunk', '덩어리형 손상이며 검출 면적이 작업 기준 1 cm² 이상입니다.'
     if bright_rim >= .18 and elongation < 2.2:
-        return 'chip_cut', '고무 표면과 다른 덩어리형 절단·뜯김 경계가 보입니다.'
+        return 'chunk', '고무 표면과 다른 덩어리형 경계가 보입니다. 1 cm² 미만이어서 집계 전 확인이 필요합니다.'
     if elongation >= 2.2 or (length_mm >= 8 and width_mm <= 2.5):
         return 'tear', '길고 좁게 이어진 균열 형태입니다.'
-    return 'chip_cut', ('작은 덩어리형 손상이며 주변 고무와 구별되는 경계가 있습니다.'
-                        if bright_rim >= .18 else '작은 덩어리형 손상으로 자동 분류했습니다.')
+    return 'chunk', ('덩어리형 손상 후보입니다. 1 cm² 미만이어서 집계 전 확인이 필요합니다.'
+                     if bright_rim >= .18 else '작은 덩어리형 손상 후보입니다. 집계 전 확인이 필요합니다.')
 
 
 def _automatic_candidate(section_id, polygon, bbox, area_mm2, length_mm,
                          contrast, score, suggestion, reason, basis, repeated_score=None):
     """One review schema shared by every automatic detection pass."""
+    below_threshold = suggestion == 'chunk' and area_mm2 < CHUNK_MIN_AREA_MM2
     return {'id': uuid4().hex[:12], 'section_id': section_id,
             'polygon': polygon, 'bbox': bbox, 'area_mm2': area_mm2,
             'length_mm': round(length_mm, 1), 'contrast': round(contrast, 1),
-            'score': round(score, 3), 'status': 'accepted', 'source': 'automatic',
-            'damage_type': suggestion, 'suggested_damage_type': suggestion,
-            'suggestion_reason': reason, 'decision_source': 'auto',
+            'score': round(score, 3), 'status': 'pending' if below_threshold else 'accepted', 'source': 'automatic',
+            'damage_type': None if below_threshold else suggestion, 'suggested_damage_type': suggestion,
+            'suggestion_reason': reason, 'decision_source': None if below_threshold else 'auto',
             'detection_basis': basis, 'repeated_structure_score': repeated_score}
 
 
@@ -512,10 +528,10 @@ def _material_change_candidates(color, gray, authored, sections, zones, group,
         if area_mm2 < 5:
             continue
         length_mm = float(np.sqrt(eigen[1]) * 3.5 * np.sqrt(scale_x*scale_y) / pixels_per_mm)
-        suggestion = 'chunk' if area_mm2 >= 100 else 'chip_cut'
+        suggestion = 'chunk'
         reason = ('검출 면적이 1 cm² 이상이며 고무 표면의 색·질감 변화가 모여 있습니다.'
-                  if suggestion == 'chunk' else
-                  '검은 핵심부가 적어도 고무 표면의 색·질감 변화가 덩어리로 모여 있습니다.')
+                  if area_mm2 >= CHUNK_MIN_AREA_MM2 else
+                  '고무 표면의 색·질감 변화가 모인 덩어리형 후보입니다. 1 cm² 미만이어서 집계 전 확인이 필요합니다.')
         score = min(.85, round(float(np.mean(chroma[y:y+height, x:x+width][region]))
                                  / max(colour_limit * 2, 1), 3))
         proposals.append(_automatic_candidate(group['sections'][code-1]['id'], polygon, bbox,
@@ -951,7 +967,7 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
                                   and not any(_same_damage_location(item, saved) for saved in dismissed)]
     else:
         dismissed = []
-    data = {'version': 1, 'created_at': datetime.now(timezone.utc).isoformat(), 'zone_created_at': zones['created_at'],
+    data = {'version': 2, 'created_at': datetime.now(timezone.utc).isoformat(), 'zone_created_at': zones['created_at'],
             'group_id': group_id, 'sensitivity': sensitivity, 'image_size_wh': zones['image_size_wh'],
             'pixels_per_mm': ppm,
             'sections': [{'id': section['id'], 'name': section['name'], 'color': section['color']} for section in group['sections']],
@@ -1289,13 +1305,13 @@ def add_manual_crack(result_dir, points, closed=False, candidate_id=None):
     contours, _ = cv2.findContours(raster, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contour = cv2.approxPolyDP(max(contours, key=cv2.contourArea), 1., True).reshape(-1, 2)
     x, y, bw, bh = cv2.boundingRect(contour)
-    # For a closed hand-drawn boundary, measure the original image-space path.
-    # The coarse zone raster can otherwise shift a 1 cm² decision at the edge.
+    # Measure the original hand-drawn boundary; the coarse zone raster can skew
+    # the reported physical area of a small mark.
     area_mm2 = round(_polygon_area(path) / zones['nominal_pixels_per_mm'] ** 2, 2) if closed else round(
         _polygon_area(contour) / (sx * sy * zones['nominal_pixels_per_mm'] ** 2), 2)
     if closed and area_mm2 < .5:
         raise ValueError('닫힌 경계 안쪽에 손상 면적이 있어야 합니다. 경계를 한 바퀴 둘러 그려 주세요.')
-    damage_type = ('tear' if not closed else 'chunk' if area_mm2 >= 100 else 'chip_cut')
+    damage_type = 'chunk' if closed else 'tear'
     candidate = next((item for item in data['candidates'] if item['id'] == candidate_id), None) if candidate_id else None
     if candidate_id and candidate is None:
         raise ValueError('수정할 후보를 찾을 수 없습니다.')

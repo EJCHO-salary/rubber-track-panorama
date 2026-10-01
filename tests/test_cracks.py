@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from track_unwrap import api
-from track_unwrap.cracks import (_anomaly_candidates, _dark_fissure_mask,
+from track_unwrap.cracks import (_anomaly_candidates, _automatic_candidate, _dark_fissure_mask,
                                  _filter_recurrent_anomalies, _fine_dark_candidates,
                                  _is_sprocket_relief,
                                  _material_change_candidates,
@@ -55,7 +55,7 @@ def test_unique_fissure_can_be_reviewed_and_counted_by_section(tmp_path):
     assert fissures, 'unique dark fissure should have a reviewable proposal'
     candidate = fissures[0]
     assert candidate['status'] == 'accepted'
-    assert candidate['damage_type'] in {'tear', 'chunk', 'chip_cut'}
+    assert candidate.get('damage_type') in {'tear', 'chunk', None}
     assert candidate['decision_source'] == 'auto'
     reviewed = review_crack(tmp_path, candidate['id'], 'accepted')
     assert reviewed['totals']['accepted'] == result['totals']['accepted']
@@ -91,7 +91,7 @@ def test_batch_classification_and_area_rule_preserve_explicit_decisions(tmp_path
     assert by_id['smaller']['status'] == 'accepted' and by_id['smaller']['decision_source'] == 'auto'
     assert by_id['ruled_out']['status'] == 'excluded'
     assert by_id['manual']['status'] == 'accepted' and by_id['manual']['damage_type'] is None
-    assert result['accepted_by_type'] == {'chip_cut': 2, 'chunk': 1, 'tear': 0, 'unclassified': 1}
+    assert result['accepted_by_type'] == {'chunk': 3, 'tear': 0, 'unclassified': 1}
     changed = review_cracks(tmp_path, ['bigger', 'smaller'], 'excluded')
     assert changed['totals']['excluded'] == 3
     assert changed['accepted_by_type']['chunk'] == 1
@@ -205,12 +205,48 @@ def test_fine_pass_finds_small_dark_line_only_inside_authored_area():
 def test_damage_type_hint_requires_geometry_and_exposed_edge():
     assert _suggest_damage_type(18, 30, 4, .05)[0] == 'tear'
     assert _suggest_damage_type(327, 254, 7, .05)[0] == 'tear'  # Long fissure over 1 cm².
-    assert _suggest_damage_type(30, 12, 2, .3)[0] == 'chip_cut'
+    assert _suggest_damage_type(30, 12, 2, .3)[0] == 'chunk'
     assert _suggest_damage_type(120, 13, 1.5, .4)[0] == 'chunk'
     assert _suggest_damage_type(120, 13, 1.5, .05)[0] == 'chunk'
 
 
-def test_material_change_recovers_compact_chip_with_sparse_black_core():
+def test_compact_damage_uses_100_square_mm_as_automatic_count_threshold():
+    polygon = [[0, 0], [10, 0], [10, 10], [0, 10]]
+    def proposal(area):
+        return _automatic_candidate('surface', polygon, [0, 0, 10, 10], area, 4, 20, .7,
+                                    'chunk', 'compact loss', 'material_change')
+    assert proposal(99.99)['status'] == 'pending' and proposal(99.99)['damage_type'] is None
+    assert proposal(100)['status'] == 'accepted' and proposal(100)['damage_type'] == 'chunk'
+
+
+def test_small_automatic_loss_waits_for_review_and_legacy_manual_decision_survives(tmp_path):
+    folder = tmp_path / 'cracks'
+    folder.mkdir()
+    def candidate(identifier, source):
+        return {'id': identifier, 'section_id': 'surface', 'polygon': [[0, 0], [20, 0], [20, 20], [0, 20]],
+                'bbox': [0, 0, 20, 20], 'area_mm2': 64, 'length_mm': 8, 'status': 'accepted',
+                'source': source, 'damage_type': 'chip_cut', 'suggested_damage_type': 'chip_cut',
+                'decision_source': 'auto' if source == 'automatic' else 'manual'}
+    override = candidate('tear_override', 'manual')
+    override['damage_type'] = 'tear'
+    review = {'version': 1, 'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866'}],
+              'pixels_per_mm': 2.5, 'candidates': [candidate('auto', 'automatic'), candidate('user', 'manual'), override]}
+    (folder / 'review.json').write_text(json.dumps(review), encoding='utf-8')
+    migrated = load_cracks(tmp_path)
+    assert migrated['version'] == 2
+    assert migrated['chunk_min_area_mm2'] == 100
+    assert migrated['totals']['accepted'] == 2 and migrated['totals']['proposed'] == 1
+    by_id = {item['id']: item for item in migrated['candidates']}
+    assert by_id['auto']['status'] == 'pending' and by_id['auto']['suggested_damage_type'] == 'chunk'
+    assert by_id['auto']['damage_type'] is None
+    assert by_id['user']['status'] == 'accepted' and by_id['user']['damage_type'] == 'chunk'
+    assert by_id['tear_override']['damage_type'] == 'tear'
+    accepted = review_crack(tmp_path, 'auto', 'accepted', 'chunk')
+    assert accepted['totals']['accepted'] == 3 and accepted['accepted_by_type']['chunk'] == 2
+    assert load_cracks(tmp_path)['totals']['proposed'] == 0
+
+
+def test_material_change_keeps_small_compact_loss_for_review():
     color = np.full((120, 500, 3), 155, np.uint8)
     cv2.rectangle(color, (180, 42), (199, 61), (75, 105, 162), -1)
     cv2.line(color, (180, 45), (180, 58), (45, 45, 45), 2)
@@ -222,8 +258,9 @@ def test_material_change_recovers_compact_chip_with_sparse_black_core():
     candidates = _material_change_candidates(color, gray, authored, sections, zones,
                                              group, 1., 1., 2.5, 'normal', [])
     assert any(item['bbox'][0] <= 195 <= item['bbox'][0]+item['bbox'][2]
-               and item['damage_type'] == 'chip_cut' for item in candidates)
-    assert all(item['status'] == 'accepted' and item['decision_source'] == 'auto'
+               and item['status'] == 'pending' and item['suggested_damage_type'] == 'chunk'
+               for item in candidates)
+    assert all(item['status'] == 'pending' and item['damage_type'] is None
                for item in candidates)
 
 
@@ -238,7 +275,7 @@ def test_drawn_line_and_closed_area_classify_and_refine_in_place(tmp_path, monke
     line = add_manual_crack(tmp_path, [[40, 40], [50, 55], [70, 85]])
     assert line['candidates'][0]['damage_type'] == 'tear'
     small = add_manual_crack(tmp_path, [[105, 105], [125, 105], [125, 125], [105, 125]], closed=True)
-    assert small['candidates'][0]['damage_type'] == 'chip_cut'
+    assert small['candidates'][0]['damage_type'] == 'chunk'
     assert small['candidates'][0]['area_mm2'] == 64
     identifier = small['candidates'][0]['id']
     large = add_manual_crack(tmp_path, [[105, 105], [145, 105], [145, 145], [105, 145]],
@@ -389,7 +426,7 @@ def test_guided_click_rejects_dark_damage_outside_authored_zone(tmp_path):
     _test_zones(tmp_path, [[0, 0], [145, 0], [145, 199], [0, 199]])
     propose_cracks(tmp_path, 'geometry', 'normal')
     with pytest.raises(ValueError, match='지정된 영역'):
-        trace_crack(tmp_path, [230, 70], 'chip_cut', 1.5, 30)
+        trace_crack(tmp_path, [230, 70], 'chunk', 1.5, 30)
 
 
 def test_guided_wide_tear_is_previewed_with_warning_instead_of_blocked(tmp_path):

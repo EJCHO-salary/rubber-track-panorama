@@ -9,6 +9,7 @@ from track_unwrap import api
 from track_unwrap.cracks import (_anomaly_candidates, _dark_fissure_mask,
                                  _filter_recurrent_anomalies, _fine_dark_candidates,
                                  _is_sprocket_relief,
+                                 _material_change_candidates,
                                  _periodic_dark_anomaly, _polygon_overlap_fraction,
                                  _repeated_structure_support,
                                  _repair_narrow_authored_seams, _ridge_bridge,
@@ -53,21 +54,21 @@ def test_unique_fissure_can_be_reviewed_and_counted_by_section(tmp_path):
                 and item['bbox'][1] <= 45 <= item['bbox'][1]+item['bbox'][3]]
     assert fissures, 'unique dark fissure should have a reviewable proposal'
     candidate = fissures[0]
-    assert candidate['status'] == 'pending'
-    assert candidate['damage_type'] is None
-    assert 'suggested_damage_type' in candidate
+    assert candidate['status'] == 'accepted'
+    assert candidate['damage_type'] in {'tear', 'chunk', 'chip_cut'}
+    assert candidate['decision_source'] == 'auto'
     reviewed = review_crack(tmp_path, candidate['id'], 'accepted')
-    assert reviewed['totals']['accepted'] == 1
-    assert reviewed['summary']['surface']['accepted'] == 1
-    assert load_cracks(tmp_path)['candidates'][0]['status'] in {'pending', 'accepted'}
+    assert reviewed['totals']['accepted'] == result['totals']['accepted']
+    assert reviewed['summary']['surface']['accepted'] == result['summary']['surface']['accepted']
+    assert load_cracks(tmp_path)['candidates'][0]['status'] == 'accepted'
     undone = review_crack(tmp_path, candidate['id'], 'excluded')
-    assert undone['totals']['accepted'] == 0 and undone['totals']['excluded'] == 1
+    assert undone['totals']['accepted'] == result['totals']['accepted'] - 1 and undone['totals']['excluded'] == 1
     manual = add_manual_crack(tmp_path, [[270, 22], [280, 40], [292, 51]])
     assert manual['candidates'][0]['source'] == 'manual'
     assert manual['candidates'][0]['status'] == 'accepted'
-    assert manual['totals']['accepted'] == 1
+    assert manual['totals']['accepted'] == result['totals']['accepted']
     cleared = delete_manual_crack(tmp_path, manual['candidates'][0]['id'])
-    assert cleared['totals']['accepted'] == 0
+    assert cleared['totals']['accepted'] == result['totals']['accepted'] - 1
 
 
 def test_batch_classification_and_area_rule_preserve_explicit_decisions(tmp_path):
@@ -84,13 +85,13 @@ def test_batch_classification_and_area_rule_preserve_explicit_decisions(tmp_path
     (folder / 'review.json').write_text(json.dumps(review), encoding='utf-8')
     result = review_cracks(tmp_path, ['reference'], 'accepted', 'chunk', True)
     by_id = {item['id']: item for item in result['candidates']}
-    assert result['last_review'] == {'selected': 1, 'auto_accepted': 1}
+    assert result['last_review'] == {'selected': 1, 'auto_accepted': 0}
     assert (by_id['reference']['status'], by_id['reference']['damage_type'], by_id['reference']['decision_source']) == ('accepted', 'chunk', 'manual')
-    assert (by_id['bigger']['status'], by_id['bigger']['damage_type'], by_id['bigger']['decision_source']) == ('accepted', 'chunk', 'auto')
-    assert by_id['smaller']['status'] == 'pending'
+    assert by_id['bigger']['status'] == 'accepted' and by_id['bigger']['decision_source'] == 'auto'
+    assert by_id['smaller']['status'] == 'accepted' and by_id['smaller']['decision_source'] == 'auto'
     assert by_id['ruled_out']['status'] == 'excluded'
     assert by_id['manual']['status'] == 'accepted' and by_id['manual']['damage_type'] is None
-    assert result['accepted_by_type'] == {'chip_cut': 0, 'chunk': 2, 'tear': 0, 'unclassified': 1}
+    assert result['accepted_by_type'] == {'chip_cut': 2, 'chunk': 1, 'tear': 0, 'unclassified': 1}
     changed = review_cracks(tmp_path, ['bigger', 'smaller'], 'excluded')
     assert changed['totals']['excluded'] == 3
     assert changed['accepted_by_type']['chunk'] == 1
@@ -152,6 +153,22 @@ def test_pitch_anomaly_recovers_one_deep_crack_on_a_repeated_edge():
                                'normal', []) == []
 
 
+def test_pitch_anomaly_discards_tall_repeated_groove_wall():
+    gray = np.full((120, 120), 150, np.uint8)
+    response = np.zeros_like(gray)
+    anomaly = np.zeros_like(gray)
+    gray[20:100, 30:45] = 20
+    response[20:100, 30:45] = 80
+    anomaly[20:100, 30:45] = 70
+    mask = np.ones_like(gray)
+    group = {'sections': [{'id': 'surface'}]}
+    args = (gray, response, anomaly, mask, mask, group, 1., 1., 2.5, 72, 'normal', [])
+    assert _anomaly_candidates(*args)
+    repeated = np.zeros_like(gray, np.float32)
+    repeated[20:100, 30:45] = .9
+    assert not _anomaly_candidates(*args, repeated_support=repeated)
+
+
 def test_anomaly_filter_keeps_isolated_crack_and_discards_repeating_relief():
     def candidate(identifier, x, y, score):
         return {'id': identifier, 'bbox': [x, y, 5, 30], 'score': score}
@@ -187,9 +204,60 @@ def test_fine_pass_finds_small_dark_line_only_inside_authored_area():
 
 def test_damage_type_hint_requires_geometry_and_exposed_edge():
     assert _suggest_damage_type(18, 30, 4, .05)[0] == 'tear'
+    assert _suggest_damage_type(327, 254, 7, .05)[0] == 'tear'  # Long fissure over 1 cm².
     assert _suggest_damage_type(30, 12, 2, .3)[0] == 'chip_cut'
     assert _suggest_damage_type(120, 13, 1.5, .4)[0] == 'chunk'
-    assert _suggest_damage_type(120, 13, 1.5, .05)[0] is None
+    assert _suggest_damage_type(120, 13, 1.5, .05)[0] == 'chunk'
+
+
+def test_material_change_recovers_compact_chip_with_sparse_black_core():
+    color = np.full((120, 500, 3), 155, np.uint8)
+    cv2.rectangle(color, (180, 42), (199, 61), (75, 105, 162), -1)
+    cv2.line(color, (180, 45), (180, 58), (45, 45, 45), 2)
+    gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+    authored = np.ones(gray.shape, np.uint8)
+    sections = np.ones_like(authored)
+    zones = {'pitch_anchors_x': list(range(0, 501, 50))}
+    group = {'sections': [{'id': 'surface'}]}
+    candidates = _material_change_candidates(color, gray, authored, sections, zones,
+                                             group, 1., 1., 2.5, 'normal', [])
+    assert any(item['bbox'][0] <= 195 <= item['bbox'][0]+item['bbox'][2]
+               and item['damage_type'] == 'chip_cut' for item in candidates)
+    assert all(item['status'] == 'accepted' and item['decision_source'] == 'auto'
+               for item in candidates)
+
+
+def test_drawn_line_and_closed_area_classify_and_refine_in_place(tmp_path, monkeypatch):
+    image = np.full((400, 400, 3), 155, np.uint8)
+    cv2.imwrite(str(tmp_path / 'panorama.png'), image)
+    (tmp_path / 'quality_report.json').write_text(json.dumps({
+        'settings': {'width_mm': 160, 'pitch_mm': 20, 'pixels_per_mm': 2.5},
+    }), encoding='utf-8')
+    _test_zones(tmp_path, [[0, 0], [399, 0], [399, 399], [0, 399]])
+    propose_cracks(tmp_path, 'geometry')
+    line = add_manual_crack(tmp_path, [[40, 40], [50, 55], [70, 85]])
+    assert line['candidates'][0]['damage_type'] == 'tear'
+    small = add_manual_crack(tmp_path, [[105, 105], [125, 105], [125, 125], [105, 125]], closed=True)
+    assert small['candidates'][0]['damage_type'] == 'chip_cut'
+    assert small['candidates'][0]['area_mm2'] < 100
+    identifier = small['candidates'][0]['id']
+    large = add_manual_crack(tmp_path, [[105, 105], [145, 105], [145, 145], [105, 145]],
+                             closed=True, candidate_id=identifier)
+    assert len(large['candidates']) == 2
+    assert next(item for item in large['candidates'] if item['id'] == identifier)['damage_type'] == 'chunk'
+    assert large['accepted_by_type']['chunk'] == 1 and large['accepted_by_type']['tear'] == 1
+    assert large['summary']['surface']['area_mm2'] == large['totals']['area_mm2']
+    assert large['totals']['area_mm2'] >= next(item for item in large['candidates'] if item['id'] == identifier)['area_mm2']
+    monkeypatch.setattr(api, '_zones_dir', lambda _: tmp_path)
+    with TestClient(api.app) as client:
+        response = client.post('/api/jobs/' + 'a'*32 + '/cracks/manual', json={
+            'points': [[105, 105], [145, 105], [145, 145], [105, 145]],
+            'closed': True, 'candidate_id': identifier})
+    assert response.status_code == 200
+    assert len(response.json()['candidates']) == 2
+    assert response.json()['accepted_by_type']['chunk'] == 1
+    with pytest.raises(ValueError, match='손상 면적'):
+        add_manual_crack(tmp_path, [[210, 100], [220, 100], [230, 100]], closed=True)
 
 
 def test_guided_selection_bridges_short_gap_without_neighbor_and_offsets_outline():
@@ -386,10 +454,10 @@ def test_reproposal_keeps_reviewed_candidate_and_manual_path(tmp_path):
     reviewed = review_crack(tmp_path, first['candidates'][0]['id'], 'excluded')
     manual = add_manual_crack(tmp_path, [[270, 22], [280, 40], [292, 51]])
     again = propose_cracks(tmp_path, 'geometry', 'normal')
-    assert again['totals']['excluded'] == 1
-    assert again['totals']['accepted'] == 1
-    assert {item['id'] for item in again['candidates'] if item['status'] != 'pending'} == {
-        reviewed['candidates'][0]['id'], manual['candidates'][0]['id']}
+    assert again['totals']['excluded'] == 0
+    assert again['totals']['accepted'] >= 1
+    assert reviewed['candidates'][0]['id'] not in {item['id'] for item in again['candidates']}
+    assert manual['candidates'][0]['id'] in {item['id'] for item in again['candidates']}
 
 
 def test_clear_all_candidates_then_repropose_from_current_detector(tmp_path, monkeypatch):
@@ -419,8 +487,8 @@ def test_clear_all_candidates_then_repropose_from_current_detector(tmp_path, mon
 
         fresh = client.post(f'/api/jobs/{job_id}/cracks/propose', json={'group_id': 'geometry', 'sensitivity': 'high'}).json()
         assert fresh['candidates']
-        assert fresh['totals']['excluded'] == fresh['totals']['accepted'] == 0
-        assert all(item['status'] == 'pending' and item['source'] == 'automatic' for item in fresh['candidates'])
+        assert fresh['totals']['excluded'] == 0 and fresh['totals']['accepted'] > 0
+        assert all(item['status'] == 'accepted' and item['damage_type'] for item in fresh['candidates'])
 
 
 def test_only_drawn_area_produces_crack_candidates(tmp_path):

@@ -12,11 +12,12 @@ import numpy as np
 
 
 def nearest(candidates, center, radius=45):
-    x, y = center
     matches = []
     for candidate in candidates:
-        bx, by, width, height = candidate['bbox']
-        distance = float(np.hypot(bx + width / 2 - x, by + height / 2 - y))
+        contour = np.asarray(candidate['polygon'], np.float32)
+        # A long, correctly detected tear can have its centroid hundreds of
+        # pixels from the labeled point. Compare the outline itself.
+        distance = max(0., -float(cv2.pointPolygonTest(contour, tuple(map(float, center)), True)))
         if distance <= radius:
             matches.append((distance, candidate))
     return min(matches, key=lambda item: item[0])[1] if matches else None

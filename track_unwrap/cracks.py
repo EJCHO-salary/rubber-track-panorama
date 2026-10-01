@@ -1,7 +1,6 @@
-"""Reviewable dark-fissure proposals on a human-authored region map.
+"""Image-based damage estimates on a human-authored region map.
 
-These are image candidates, not diagnoses. Missing rubber (chips/chunks), depth,
-and steel exposure cannot be reliably inferred from this overhead image.
+The proposed class and area are image measurements, not a depth measurement.
 """
 import json
 import heapq
@@ -38,6 +37,20 @@ def load_cracks(result_dir):
         candidate.setdefault('suggestion_reason', None)
         candidate.setdefault('decision_source', 'manual' if candidate['status'] != 'pending' else None)
         candidate.setdefault('area_mm2', _polygon_area(candidate['polygon']) / ppm ** 2)
+        candidate.setdefault('length_mm', max(candidate['bbox'][2:]) / ppm)
+        # Older review files stored proposals and guided selections as pending.
+        # Both now participate in the tally without requiring a second click.
+        if candidate['status'] == 'pending':
+            box = candidate['bbox']
+            suggestion, reason = (candidate.get('damage_type') or candidate.get('suggested_damage_type'),
+                                  candidate.get('suggestion_reason'))
+            if suggestion not in DAMAGE_TYPES:
+                suggestion, reason = _suggest_damage_type(
+                    candidate['area_mm2'], candidate['length_mm'],
+                    max(box[2], box[3]) / max(1., min(box[2], box[3])), 0.)
+            candidate.update(status='accepted', damage_type=suggestion,
+                             suggested_damage_type=suggestion, suggestion_reason=reason,
+                             decision_source='manual' if candidate['source'] == 'manual' else 'auto')
     return _summary(data)
 
 
@@ -63,19 +76,22 @@ def _write(result_dir, data):
 
 
 def _summary(data):
-    sections = {item['id']: {'proposed': 0, 'accepted': 0, 'excluded': 0, 'length_mm': 0.}
+    sections = {item['id']: {'proposed': 0, 'accepted': 0, 'excluded': 0,
+                             'length_mm': 0., 'area_mm2': 0.}
                 for item in data['sections']}
     for item in data['candidates']:
         section = sections[item['section_id']]
         section[{'pending': 'proposed', 'accepted': 'accepted', 'excluded': 'excluded'}[item['status']]] += 1
         if item['status'] == 'accepted':
             section['length_mm'] += item['length_mm']
+            section['area_mm2'] += item.get('area_mm2', 0.)
     for section in sections.values():
         section['length_mm'] = round(section['length_mm'], 1)
+        section['area_mm2'] = round(section['area_mm2'], 1)
     data['summary'] = sections
-    data['totals'] = {key: round(sum(value[key] for value in sections.values()), 1) if key == 'length_mm'
+    data['totals'] = {key: round(sum(value[key] for value in sections.values()), 1) if key in {'length_mm', 'area_mm2'}
                       else sum(value[key] for value in sections.values())
-                      for key in ('proposed', 'accepted', 'excluded', 'length_mm')}
+                      for key in ('proposed', 'accepted', 'excluded', 'length_mm', 'area_mm2')}
     data['accepted_by_type'] = {key: sum(item['status'] == 'accepted' and item.get('damage_type') == key
                                       for item in data['candidates']) for key in sorted(DAMAGE_TYPES)}
     data['accepted_by_type']['unclassified'] = sum(item['status'] == 'accepted' and not item.get('damage_type')
@@ -210,15 +226,22 @@ def _bright_rim_fraction(gray, labels, label, x, y, width, height):
 
 
 def _suggest_damage_type(area_mm2, length_mm, elongation, bright_rim):
-    """Conservative image-only morphology hint; a user must confirm the mode."""
+    """Suggest a visual class; 1 cm² is a project convention, not a material standard.
+
+    A long narrow fissure remains a tear even when its traced area is large.
+    Only compact apparent material loss is split by the local area threshold.
+    """
     width_mm = area_mm2 / max(length_mm, .1)
-    if area_mm2 >= 100 and width_mm >= 6 and elongation < 2.5 and bright_rim >= .3:
-        return 'chunk', '넓고 불규칙한 결손과 밝은 노출 경계가 함께 보입니다.'
-    if area_mm2 >= 10 and width_mm >= 1.5 and bright_rim >= .18:
-        return 'chip_cut', '선형 균열보다 폭이 넓고 밝은 절단·뜯김 경계가 보입니다.'
-    if length_mm >= 12 and width_mm <= 1.9 and elongation >= 2.2:
-        return 'tear', '폭이 좁고 길게 이어진 어두운 균열입니다.'
-    return None, None
+    if length_mm >= 8 and width_mm <= 2.5 and elongation >= 2.2:
+        return 'tear', '면적과 관계없이 길고 좁게 이어진 균열 형태입니다.'
+    if area_mm2 >= 100:
+        return 'chunk', '덩어리형 손상이며 검출 면적이 작업 기준 1 cm² 이상입니다.'
+    if bright_rim >= .18 and elongation < 2.2:
+        return 'chip_cut', '고무 표면과 다른 덩어리형 절단·뜯김 경계가 보입니다.'
+    if elongation >= 2.2 or (length_mm >= 8 and width_mm <= 2.5):
+        return 'tear', '길고 좁게 이어진 균열 형태입니다.'
+    return 'chip_cut', ('작은 덩어리형 손상이며 주변 고무와 구별되는 경계가 있습니다.'
+                        if bright_rim >= .18 else '작은 덩어리형 손상으로 자동 분류했습니다.')
 
 
 def _automatic_candidate(section_id, polygon, bbox, area_mm2, length_mm,
@@ -227,9 +250,9 @@ def _automatic_candidate(section_id, polygon, bbox, area_mm2, length_mm,
     return {'id': uuid4().hex[:12], 'section_id': section_id,
             'polygon': polygon, 'bbox': bbox, 'area_mm2': area_mm2,
             'length_mm': round(length_mm, 1), 'contrast': round(contrast, 1),
-            'score': round(score, 3), 'status': 'pending', 'source': 'automatic',
-            'damage_type': None, 'suggested_damage_type': suggestion,
-            'suggestion_reason': reason, 'decision_source': None,
+            'score': round(score, 3), 'status': 'accepted', 'source': 'automatic',
+            'damage_type': suggestion, 'suggested_damage_type': suggestion,
+            'suggestion_reason': reason, 'decision_source': 'auto',
             'detection_basis': basis, 'repeated_structure_score': repeated_score}
 
 
@@ -299,7 +322,8 @@ def _polygon_overlap_fraction(first, second, scale_x, scale_y):
 
 
 def _anomaly_candidates(gray, raw_response, anomaly, mask, authored, group,
-                        scale_x, scale_y, pixels_per_mm, core_limit, sensitivity, existing):
+                        scale_x, scale_y, pixels_per_mm, core_limit, sensitivity, existing,
+                        repeated_support=None):
     """Recover near-black cracks that the repeated-geometry veto would miss."""
     anomaly_limit = {'low': 34, 'normal': 26, 'high': 20}[sensitivity]
     core = ((gray <= min(100, core_limit + 28)) & (anomaly >= anomaly_limit) &
@@ -318,6 +342,13 @@ def _anomaly_candidates(gray, raw_response, anomaly, mask, authored, group,
         if area < 8 or area > 1500:
             continue
         region = labels[y:y+height, x:x+width] == label
+        # A whole molded groove wall can be darker in one photograph while
+        # retaining the same tall, wide shape across the two-pitch motif.
+        # Suppress that relief; a narrow irregular fissure remains eligible.
+        if (repeated_support is not None and width >= 10 and height >= 45
+                and height > width * 2
+                and float(np.mean(repeated_support[y:y+height, x:x+width][region])) >= .7):
+            continue
         black_count = int(np.count_nonzero(region & (gray[y:y+height, x:x+width] <= core_limit)))
         black_fraction = black_count / area
         if black_count < 4 or black_fraction < .30:
@@ -386,6 +417,111 @@ def _is_sprocket_relief(candidate, hole_band, anchors, pitch_spacing, scale_x, s
                      bh > (hole_band[1] - hole_band[0]) * .48 and
                      float(np.min(np.abs(anchors - cx))) < pitch_spacing * .12)
     return horizontal_lip or vertical_wall
+
+
+def _periodic_material_difference(color, anchors, scale_x):
+    """Compare rubber colour and luminance with equivalent two-pitch surfaces."""
+    height, width = color.shape[:2]
+    positions = np.rint(np.asarray(anchors) / scale_x).astype(int)
+    lab = cv2.cvtColor(color, cv2.COLOR_BGR2LAB).astype(np.float32)
+    chroma = np.zeros((height, width), np.float32)
+    lightness = np.zeros_like(chroma)
+    for parity in (0, 1):
+        spans = [(positions[i], positions[i+1]) for i in range(len(positions)-1)
+                 if i % 2 == parity and 0 <= positions[i] < positions[i+1] <= width
+                 and positions[i+1]-positions[i] >= 20]
+        if len(spans) < 4:
+            continue
+        strips = np.stack([cv2.resize(lab[:, left:right], (128, height),
+                                      interpolation=cv2.INTER_LINEAR) for left, right in spans])
+        reference = np.median(strips, axis=0)
+        for strip, (left, right) in zip(strips, spans):
+            difference = strip - reference
+            # A whole source photograph may have a different colour cast.
+            row_cast = np.median(difference, axis=1)
+            row_cast = cv2.GaussianBlur(row_cast[:, None, :], (1, 0), 0,
+                                        sigmaY=max(2, height * .03))[:, 0, :]
+            difference -= row_cast[:, None, :]
+            chroma[:, left:right] = cv2.resize(
+                np.linalg.norm(difference[:, :, 1:3], axis=2), (right-left, height))
+            lightness[:, left:right] = cv2.resize(
+                np.abs(difference[:, :, 0]), (right-left, height))
+    return chroma, lightness
+
+
+def _material_change_candidates(color, gray, authored, sections, zones, group,
+                                scale_x, scale_y, pixels_per_mm, sensitivity, existing):
+    """Find grouped missing-rubber texture with only sparse black evidence."""
+    chroma, lightness = _periodic_material_difference(
+        color, zones['pitch_anchors_x'], scale_x)
+    texture = cv2.blur(np.abs(cv2.Laplacian(gray, cv2.CV_32F)), (7, 7))
+    colour_limit = {'low': 21, 'normal': 18, 'high': 16}[sensitivity]
+    material = ((chroma >= colour_limit) |
+                ((lightness >= colour_limit + 12) & (texture >= 10)))
+    material &= (gray < 205) & (texture >= 5) & (authored > 0)
+    binary = cv2.morphologyEx(np.uint8(material), cv2.MORPH_CLOSE,
+                              np.ones((5, 5), np.uint8))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,
+                              np.ones((3, 3), np.uint8))
+    binary[authored == 0] = 0
+    distance = cv2.distanceTransform(np.uint8(authored > 0), cv2.DIST_L2, 3)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+    proposals = []
+    for label in range(1, count):
+        x, y, width, height, pixels = map(int, stats[label])
+        if (pixels < 20 or pixels > 1200 or max(width, height) < 8 or
+                min(x, y) < 5 or x+width > gray.shape[1]-5 or y+height > gray.shape[0]-5):
+            continue
+        region = labels[y:y+height, x:x+width] == label
+        if np.mean(distance[y:y+height, x:x+width][region] >= 5) < .7:
+            continue
+        # A chip can have little black, but must still show some dark recessed
+        # edge. Dense black regions belong to the fissure detector instead.
+        halo = cv2.dilate(np.uint8(region), np.ones((5, 5), np.uint8)) > 0
+        black = int(np.count_nonzero(halo & (gray[y:y+height, x:x+width] <= 95)))
+        if black < 3 or black / pixels > .4:
+            continue
+        yy, xx = np.nonzero(region)
+        covariance = np.cov(np.column_stack((xx, yy)).astype(np.float32), rowvar=False)
+        eigen = np.linalg.eigvalsh(covariance)
+        elongation = float(np.sqrt((eigen[1] + 1) / (eigen[0] + 1)))
+        if elongation > 3.2:
+            continue
+        contours, _ = cv2.findContours(np.uint8(region), cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        outline = cv2.approxPolyDP(max(contours, key=cv2.contourArea), .7, True).reshape(-1, 2)
+        if len(outline) < 3:
+            continue
+        polygon = [[round((x+float(px))*scale_x, 1), round((y+float(py))*scale_y, 1)]
+                   for px, py in outline]
+        bbox = [round(x*scale_x, 1), round(y*scale_y, 1),
+                round(width*scale_x, 1), round(height*scale_y, 1)]
+        candidate = {'polygon': polygon, 'bbox': bbox}
+        if not _inside_authored(candidate, authored, scale_x, scale_y):
+            continue
+        if any(_polygon_overlap_fraction(candidate, prior, scale_x, scale_y) >= .35
+               for prior in existing + proposals):
+            continue
+        codes = sections[y:y+height, x:x+width][region]
+        code = int(np.bincount(codes, minlength=len(group['sections'])+1)[1:].argmax() + 1)
+        if not 1 <= code <= len(group['sections']):
+            continue
+        area_mm2 = round(_polygon_area(polygon) / pixels_per_mm ** 2, 2)
+        if area_mm2 < 5:
+            continue
+        length_mm = float(np.sqrt(eigen[1]) * 3.5 * np.sqrt(scale_x*scale_y) / pixels_per_mm)
+        suggestion = 'chunk' if area_mm2 >= 100 else 'chip_cut'
+        reason = ('검출 면적이 1 cm² 이상이며 고무 표면의 색·질감 변화가 모여 있습니다.'
+                  if suggestion == 'chunk' else
+                  '검은 핵심부가 적어도 고무 표면의 색·질감 변화가 덩어리로 모여 있습니다.')
+        score = min(.85, round(float(np.mean(chroma[y:y+height, x:x+width][region]))
+                                 / max(colour_limit * 2, 1), 3))
+        proposals.append(_automatic_candidate(group['sections'][code-1]['id'], polygon, bbox,
+                                               area_mm2, length_mm, float(np.mean(texture[y:y+height, x:x+width][region])),
+                                               score, suggestion, reason, 'material_change'))
+    return proposals
 
 
 def _filter_recurrent_anomalies(candidates, anchors, pitch_px, image_height, sensitivity,
@@ -678,10 +814,12 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
     previous = load_cracks(result_dir)
     mask = cv2.imread(str(Path(result_dir) / 'zones' / f'group_{group_id}_mask.png'), cv2.IMREAD_GRAYSCALE)
     authored = cv2.imread(str(Path(result_dir) / 'zones' / f'group_{group_id}_authored.png'), cv2.IMREAD_GRAYSCALE)
-    original = cv2.imread(str(Path(result_dir) / 'panorama.png'), cv2.IMREAD_GRAYSCALE)
-    if mask is None or authored is None or original is None or mask.shape != authored.shape:
+    source_color = cv2.imread(str(Path(result_dir) / 'panorama.png'), cv2.IMREAD_COLOR)
+    if mask is None or authored is None or source_color is None or mask.shape != authored.shape:
         raise ValueError('전개 사진 또는 지정 영역 마스크를 읽을 수 없습니다.')
     h, w = mask.shape
+    original = cv2.cvtColor(source_color, cv2.COLOR_BGR2GRAY)
+    working_color = cv2.resize(source_color, (w, h), interpolation=cv2.INTER_AREA)
     gray = cv2.resize(original, (w, h), interpolation=cv2.INTER_AREA)
     # Black-hat finds dark fissures against a locally brighter rubber surface.
     # Two kernel widths tolerate both hairline and wider surface cracks.
@@ -761,10 +899,17 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = _merge_continuous_candidates(candidates[:400], gray, response, authored,
                                                scale_x, scale_y, ppm)
+    for item in candidates:
+        box = item['bbox']
+        suggestion, reason = _suggest_damage_type(
+            item['area_mm2'], item['length_mm'],
+            max(box[2], box[3]) / max(1., min(box[2], box[3])), 0.)
+        item['damage_type'] = item['suggested_damage_type'] = suggestion
+        item['suggestion_reason'] = reason
     anomaly = _periodic_dark_anomaly(gray, zones['pitch_anchors_x'], scale_x)
     anomalous = _anomaly_candidates(gray, raw_response, anomaly, mask, authored, group,
                                     scale_x, scale_y, ppm, core_limit, sensitivity,
-                                          candidates)
+                                    candidates, repeated_support)
     candidates.extend(_filter_recurrent_anomalies(
         anomalous, zones['pitch_anchors_x'], zones['pitch_px'], original.shape[0], sensitivity))
     fine = _fine_dark_candidates(original, authored, mask, zones, group,
@@ -773,17 +918,34 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
     distinct = [item for item in fine if (item.get('repeated_structure_score') or 0) < .70]
     candidates.extend(distinct + _filter_recurrent_anomalies(
         stable, zones['pitch_anchors_x'], zones['pitch_px'], original.shape[0], sensitivity, 0.))
+    candidates.extend(_material_change_candidates(
+        working_color, gray, authored, mask, zones, group,
+        scale_x, scale_y, ppm, sensitivity, candidates))
     candidates = [item for item in candidates
                   if not _is_sprocket_relief(item, hole_band, anchor_positions,
                                              pitch_spacing, scale_x, scale_y, h)]
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = candidates[:400]
     if previous and previous.get('group_id') == group_id and previous.get('zone_created_at') == zones['created_at']:
-        dismissed = previous.get('dismissed_candidates', [])
+        dismissed = previous.get('dismissed_candidates', []) + [
+            {'id': item['id'], 'bbox': item['bbox'], 'polygon': item['polygon']}
+            for item in previous['candidates'] if item['status'] == 'excluded']
         preserved = [item for item in previous['candidates']
-                     if (item['status'] != 'pending' or item.get('selection_source') == 'guided')
+                     if (item.get('decision_source') == 'manual' and item['status'] == 'accepted'
+                         or item.get('source') == 'manual'
+                         or item.get('selection_source') in {'guided', 'drawn'})
+                     and item['status'] != 'excluded'
                      and (item.get('selection_source') == 'guided'
+                          or item.get('selection_source') == 'drawn'
                           or _inside_authored(item, authored, scale_x, scale_y))]
+        for item in preserved:
+            if not item.get('damage_type'):
+                box = item['bbox']
+                item['damage_type'] = _suggest_damage_type(
+                    item['area_mm2'], item['length_mm'],
+                    max(box[2], box[3]) / max(1., min(box[2], box[3])), 0.)[0]
+                item['status'] = 'accepted'
+                item['decision_source'] = 'auto'
         candidates = preserved + [item for item in candidates
                                   if not any(_same_damage_location(item, saved) for saved in preserved)
                                   and not any(_same_damage_location(item, saved) for saved in dismissed)]
@@ -1003,6 +1165,10 @@ def trace_crack(result_dir, point, damage_type, offset_mm, tolerance=55, candida
     if not apply:
         return result
     if candidate is None:
+        candidate = next((item for item in data['candidates']
+                          if _same_damage_location(item, result)
+                          and _polygon_overlap_fraction(result, item, 1., 1.) >= .6), None)
+    if candidate is None:
         candidate = {'id': uuid4().hex[:12], 'status': 'pending', 'source': 'manual', 'damage_type': None,
                      'decision_source': None, 'score': 1., 'contrast': 0.}
         data['candidates'].insert(0, candidate)
@@ -1062,13 +1228,13 @@ def review_cracks(result_dir, candidate_ids, status, damage_type=None, auto_larg
     return _write(result_dir, _summary(data))
 
 
-def add_manual_crack(result_dir, points):
+def add_manual_crack(result_dir, points, closed=False, candidate_id=None):
     data = load_cracks(result_dir)
     zones = load_zones(result_dir)
     if not data or not zones or data['zone_created_at'] != zones['created_at']:
         raise ValueError('현재 영역에서 크랙 후보를 먼저 생성해 주세요.')
-    if not isinstance(points, list) or not 2 <= len(points) <= 100:
-        raise ValueError('균열 경로에 점을 2~100개 지정해 주세요.')
+    if not isinstance(points, list) or not (3 if closed else 2) <= len(points) <= 500:
+        raise ValueError('선은 2점 이상, 닫힌 경계는 3점 이상 지정해 주세요.')
     try:
         path = np.asarray(points, dtype=np.float64)
     except (TypeError, ValueError) as exc:
@@ -1077,6 +1243,8 @@ def add_manual_crack(result_dir, points):
     if path.shape != (len(points), 2) or not np.isfinite(path).all() or np.any(path < 0) or np.any(path[:, 0] >= width) or np.any(path[:, 1] >= height):
         raise ValueError('균열 경로 좌표를 확인해 주세요.')
     length_px = float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum())
+    if closed:
+        length_px += float(np.linalg.norm(path[-1] - path[0]))
     if length_px < 3:
         raise ValueError('균열 경로가 너무 짧습니다.')
     mask = cv2.imread(str(Path(result_dir) / 'zones' / f"group_{data['group_id']}_mask.png"), cv2.IMREAD_GRAYSCALE)
@@ -1087,27 +1255,43 @@ def add_manual_crack(result_dir, points):
     sx, sy = w / width, h / height
     work_points = np.rint(path * [sx, sy]).astype(np.int32)
     centerline = np.zeros_like(mask)
-    cv2.polylines(centerline, [work_points], False, 255, 1)
+    cv2.polylines(centerline, [work_points], bool(closed), 255, 1)
     if np.any((centerline > 0) & (authored == 0)):
         raise ValueError('수동 균열 경로는 지정된 영역 안에 그려 주세요.')
     raster = np.zeros_like(mask)
-    cv2.polylines(raster, [work_points], False, 255, 3)
-    raster[authored == 0] = 0
+    if closed:
+        cv2.fillPoly(raster, [work_points], 255)
+    else:
+        cv2.polylines(raster, [work_points], False, 255, 3)
+    if np.any((raster > 0) & (authored == 0)):
+        raise ValueError('그린 손상 영역은 지정된 영역 안에 있어야 합니다.')
     section_pixels = mask[raster > 0]
     code = int(np.bincount(section_pixels, minlength=len(data['sections'])+1)[1:].argmax() + 1)
     contours, _ = cv2.findContours(raster, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contour = cv2.approxPolyDP(max(contours, key=cv2.contourArea), 1., True).reshape(-1, 2)
     x, y, bw, bh = cv2.boundingRect(contour)
-    candidate = {'id': uuid4().hex[:12], 'section_id': data['sections'][code-1]['id'],
-                 'polygon': [[round(float(px)/sx, 1), round(float(py)/sy, 1)] for px, py in contour],
-                 'status': 'accepted', 'source': 'manual', 'damage_type': None, 'decision_source': 'manual',
-                 'length_mm': round(length_px / zones['nominal_pixels_per_mm'], 1),
-                 'area_mm2': round(_polygon_area(contour) / (sx * sy * zones['nominal_pixels_per_mm'] ** 2), 2),
-                 'contrast': 0., 'score': 1.,
-                 'bbox': [round(x/sx, 1), round(y/sy, 1), round(bw/sx, 1), round(bh/sy, 1)]}
+    area_mm2 = round(_polygon_area(contour) / (sx * sy * zones['nominal_pixels_per_mm'] ** 2), 2)
+    if closed and area_mm2 < .5:
+        raise ValueError('닫힌 경계 안쪽에 손상 면적이 있어야 합니다. 경계를 한 바퀴 둘러 그려 주세요.')
+    damage_type = ('tear' if not closed else 'chunk' if area_mm2 >= 100 else 'chip_cut')
+    candidate = next((item for item in data['candidates'] if item['id'] == candidate_id), None) if candidate_id else None
+    if candidate_id and candidate is None:
+        raise ValueError('수정할 후보를 찾을 수 없습니다.')
+    if candidate is None:
+        candidate = {'id': uuid4().hex[:12], 'source': 'manual', 'score': 1., 'contrast': 0.}
+        data['candidates'].insert(0, candidate)
+    candidate.update({'section_id': data['sections'][code-1]['id'],
+                      'polygon': [[round(float(px)/sx, 1), round(float(py)/sy, 1)] for px, py in contour],
+                      'status': 'accepted', 'damage_type': damage_type, 'decision_source': 'manual',
+                      'suggested_damage_type': damage_type,
+                      'suggestion_reason': '사용자가 직접 그린 선입니다.' if not closed else
+                      '사용자가 그린 닫힌 경계의 면적으로 분류했습니다.',
+                      'selection_source': 'drawn',
+                      'length_mm': round(length_px / zones['nominal_pixels_per_mm'], 1),
+                      'area_mm2': area_mm2,
+                      'bbox': [round(x/sx, 1), round(y/sy, 1), round(bw/sx, 1), round(bh/sy, 1)]})
     if not _inside_authored(candidate, authored, 1 / sx, 1 / sy):
         raise ValueError('수동 균열 경로는 지정된 영역 안에 그려 주세요.')
-    data['candidates'].insert(0, candidate)
     return _write(result_dir, _summary(data))
 
 

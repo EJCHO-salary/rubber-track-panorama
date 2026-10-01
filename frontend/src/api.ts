@@ -47,8 +47,8 @@ export const api = {
   reviewCracks: (id: string, candidate_ids: string[], status: 'pending' | 'accepted' | 'excluded', damage_type?: 'chunk' | 'tear' | 'chip_cut', auto_larger = false) => request<CrackReview>(`/api/jobs/${id}/cracks/review-batch`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidate_ids, status, damage_type, auto_larger }),
   }),
-  addManualCrack: (id: string, points: Point[]) => request<CrackReview>(`/api/jobs/${id}/cracks/manual`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points }),
+  addManualCrack: (id: string, points: Point[], closed = false, candidateId: string | null = null) => request<CrackReview>(`/api/jobs/${id}/cracks/manual`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points, closed, candidate_id: candidateId }),
   }),
   deleteCrack: (id: string, candidateId: string) => request<CrackReview>(`/api/jobs/${id}/cracks/${candidateId}`, { method: 'DELETE' }),
 }

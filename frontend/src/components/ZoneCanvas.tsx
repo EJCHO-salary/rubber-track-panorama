@@ -3,6 +3,7 @@ import OpenSeadragon from 'openseadragon'
 import { Maximize2, Minus, Plus } from 'lucide-react'
 import type { CrackCandidate, Point, ZoneAnalysis, ZoneInstance, ZoneShape } from '../types'
 import { fileBase, zoneFileBase } from '../api'
+import { strokeCloses } from '../stroke'
 import styles from '../pages/ZoneWorkspace.module.css'
 
 type Props = {
@@ -31,6 +32,8 @@ type Props = {
   tracePolygon?: Point[] | null
   traceSeed?: Point | null
   onCrackSeed?: (point: Point, candidateId: string | null, seedRadiusPx: number) => void
+  freehand?: boolean
+  onFreehandComplete?: (points: Point[], closed: boolean) => void
   hint?: string
   onAdd: (point: Point) => void
   onInsert: (index: number, point: Point) => void
@@ -46,7 +49,8 @@ type Props = {
 export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, closedShapes, selectedVertex, opacity,
   focusShape, suggestedPolygon, segmentInstances, adjustingSegments, selectedSegment, onSegmentSelect, onSegmentMove,
   crackCandidates = [], selectedCrackIds = [], onCrackSelect, onCrackMarquee, onCrackRegion, onCrackEmpty,
-  tracePicking = false, tracePolygon, traceSeed, onCrackSeed, hint,
+  tracePicking = false, tracePolygon, traceSeed, onCrackSeed,
+  freehand = false, onFreehandComplete, hint,
   onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete, onClose, onClosedMove, onClosedDelete }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const overlayRef = useRef<SVGSVGElement>(null)
@@ -65,6 +69,9 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
   const selectionStart = useRef<{ id: number; point: Point; candidateId: string | null; shift: boolean } | null>(null)
   const suppressCrackClick = useRef(false)
   const [selectionEnd, setSelectionEnd] = useState<Point | null>(null)
+  const freehandDrag = useRef<{ id: number; points: Point[]; screens: Point[]; lastScreen: Point } | null>(null)
+  const [freehandPreview, setFreehandPreview] = useState<Point[]>([])
+  const [freehandPreviewClosed, setFreehandPreviewClosed] = useState(false)
   const [, render] = useState(0)
 
   useEffect(() => {
@@ -124,6 +131,45 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
   function overlayPoint(event: React.PointerEvent): Point {
     const bounds = overlayRef.current!.getBoundingClientRect()
     return [event.clientX - bounds.left, event.clientY - bounds.top]
+  }
+  function startFreehand(event: React.PointerEvent<SVGSVGElement>) {
+    if (!freehand || event.button !== 0) return
+    const point = unproject(event)
+    if (!point) return
+    event.preventDefault()
+    const screen = overlayPoint(event)
+    freehandDrag.current = { id: event.pointerId, points: [point], screens: [screen], lastScreen: screen }
+    setFreehandPreview([point])
+    setFreehandPreviewClosed(false)
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+  function moveFreehand(event: React.PointerEvent<SVGSVGElement>) {
+    const drag = freehandDrag.current
+    if (!drag || drag.id !== event.pointerId) return
+    const screen = overlayPoint(event)
+    if (Math.hypot(screen[0]-drag.lastScreen[0], screen[1]-drag.lastScreen[1]) < 3) return
+    const point = unproject(event)
+    if (!point || drag.points.length >= 500) return
+    drag.points.push(point)
+    drag.screens.push(screen)
+    drag.lastScreen = screen
+    setFreehandPreview([...drag.points])
+    setFreehandPreviewClosed(strokeCloses(drag.screens))
+  }
+  function endFreehand(event: React.PointerEvent<SVGSVGElement>) {
+    const drag = freehandDrag.current
+    if (!drag || drag.id !== event.pointerId) return
+    const point = unproject(event)
+    if (point && drag.points.length < 500) {
+      drag.points.push(point)
+      drag.screens.push(overlayPoint(event))
+    }
+    const closed = strokeCloses(drag.screens)
+    if (drag.points.length >= (closed ? 3 : 2)) onFreehandComplete?.(drag.points, closed)
+    freehandDrag.current = null
+    setFreehandPreview([])
+    setFreehandPreviewClosed(closed)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
   }
   function imageRadiusForScreenPixels(screenPixels: number): number {
     if (!viewer.current) return 18
@@ -299,7 +345,7 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
   const left = project([0, 0]), right = project([imageWidth, imageHeight])
   const gridPositions = analysis.pitch_anchors_x?.length ? analysis.pitch_anchors_x
     : Array.from({ length: Math.min(201, Math.ceil(imageWidth / analysis.pitch_px) + 1) }, (_, index) => index * analysis.pitch_px)
-  const grid = editing ? gridPositions.filter(x => {
+  const grid = editing && !freehand ? gridPositions.filter(x => {
       const screen = project([x, 0])[0]
       return screen >= -30 && screen <= size.width + 30
     }) : []
@@ -312,10 +358,13 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     {failed && <div className={styles.canvasFailure}>확대 이미지를 불러오지 못했습니다.</div>}
     {ready && <svg ref={overlayRef} className={styles.overlay} width={size.width} height={size.height}
       style={{ pointerEvents: editing || selectingCracks ? 'auto' : 'none', cursor: panning ? 'grabbing' : editing || selectingCracks ? 'crosshair' : 'default' }}
-      onPointerDown={startCrackSelection} onPointerMove={moveCrackSelection} onPointerUp={endCrackSelection}
-      onPointerCancel={() => { selectionStart.current = null; setSelectionEnd(null) }}
+      onPointerDown={event => { startFreehand(event); startCrackSelection(event) }}
+      onPointerMove={event => { moveFreehand(event); moveCrackSelection(event) }}
+      onPointerUp={event => { endFreehand(event); endCrackSelection(event) }}
+      onPointerCancel={() => { freehandDrag.current = null; setFreehandPreview([]); selectionStart.current = null; setSelectionEnd(null) }}
       onClick={event => {
         const point = unproject(event)
+        if (freehand) return
         if (editing && event.button === 0 && point) { onAdd(point); return }
         if (suppressCrackClick.current) { suppressCrackClick.current = false; return }
         if (selectingCracks && point) {
@@ -355,7 +404,8 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
         const selected = selectedCrackIds.includes(candidate.id)
         return <g key={candidate.id} data-crack-id={candidate.id} style={{ cursor: selectingCracks ? 'crosshair' : 'pointer' }}>
           <polygon points={polygon(candidate.polygon)} fill="transparent" stroke="transparent" strokeWidth="14" pointerEvents="stroke" />
-          <polygon points={polygon(candidate.polygon)} className={selected ? styles.crackAreaSelected : candidate.status === 'accepted' ? styles.crackAreaAccepted : candidate.status === 'excluded' ? styles.crackAreaExcluded : styles.crackAreaPending} />
+          <polygon points={polygon(candidate.polygon)} data-mode={candidate.damage_type ?? undefined}
+            className={selected ? styles.crackAreaSelected : candidate.status === 'accepted' ? styles.crackAreaAccepted : candidate.status === 'excluded' ? styles.crackAreaExcluded : styles.crackAreaPending} />
         </g>
       })}
       {tracePolygon && <polygon points={polygon(tracePolygon)} className={styles.crackTracePreview} pointerEvents="none" />}
@@ -384,15 +434,19 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
           <path d={`M ${hx-5} ${hy} h 10 M ${hx} ${hy-5} v 10`} className={styles.segmentHandleCross} />
         </g>
       })}
-      {points.length > 1 && <polyline points={polygon(points)} className={styles.draftLine} />}
-      {editing && points.length >= 2 && points.map((point, index) => {
+      {(freehandPreview.length > 1 || points.length > 1) &&
+        (freehandPreviewClosed ? <polygon points={polygon(freehandPreview.length ? freehandPreview : points)}
+          fill="#3b9be344" stroke="#d9f7ff" strokeWidth="2" pointerEvents="none" />
+          : <polyline points={polygon(freehandPreview.length ? freehandPreview : points)}
+            className={styles.draftLine} pointerEvents="none" />)}
+      {editing && !freehand && points.length >= 2 && points.map((point, index) => {
         const next = points[(index + 1) % points.length]
         if (index === points.length-1) return null
         const a = project(point), b = project(next)
         return <line key={`edge-${index}`} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]}
           className={styles.insertEdge} onClick={event => { event.stopPropagation(); const at = unproject(event); if (at) onInsert(index+1, at) }} />
       })}
-      {editing && points.map((point, index) => {
+      {editing && !freehand && points.map((point, index) => {
         const [x, y] = project(point)
         const closing = index === 0 && points.length >= 3
         return <circle key={index} cx={x} cy={y} r={closing ? 10 : selectedVertex === index ? 7 : 6}

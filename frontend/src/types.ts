@@ -127,7 +127,7 @@ export interface CrackCandidate {
   suggested_damage_type?: 'chunk' | 'tear' | 'chip_cut' | null
   suggestion_reason?: string | null
   repeated_structure_score?: number | null
-  detection_basis?: 'dark_core' | 'pitch_dark_anomaly' | 'fine_dark_core'
+  detection_basis?: 'dark_core' | 'pitch_dark_anomaly' | 'fine_dark_core' | 'material_change'
   area_mm2?: number
   length_mm: number
   contrast: number
@@ -164,8 +164,8 @@ export interface CrackReview {
   sensitivity?: 'low' | 'normal' | 'high'
   sections?: { id: string; name: string; color: string }[]
   candidates?: CrackCandidate[]
-  summary?: Record<string, { proposed: number; accepted: number; excluded: number; length_mm: number }>
-  totals?: { proposed: number; accepted: number; excluded: number; length_mm: number }
+  summary?: Record<string, { proposed: number; accepted: number; excluded: number; length_mm: number; area_mm2: number }>
+  totals?: { proposed: number; accepted: number; excluded: number; length_mm: number; area_mm2: number }
   accepted_by_type?: Record<'chunk' | 'tear' | 'chip_cut' | 'unclassified', number>
   last_review?: { selected: number; auto_accepted: number }
 }

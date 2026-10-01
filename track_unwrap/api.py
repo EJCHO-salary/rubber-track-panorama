@@ -267,6 +267,8 @@ class CrackBatchReview(CrackReview):
 
 class ManualCrack(BaseModel):
     points: list[list[float]]
+    closed: bool = False
+    candidate_id: str | None = None
 
 
 class GuidedCrackSelection(BaseModel):
@@ -573,7 +575,8 @@ def add_job_manual_crack(job_id: str, request: ManualCrack):
     result_dir = _zones_dir(job_id)
     with _zone_lock(job_id):
         try:
-            return {**add_manual_crack(result_dir, request.points), 'ready': True, 'stale': False}
+            return {**add_manual_crack(result_dir, request.points, request.closed,
+                                       request.candidate_id), 'ready': True, 'stale': False}
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 

@@ -366,12 +366,11 @@ def _anomaly_candidates(gray, raw_response, anomaly, mask, authored, group,
         if area < 8 or area > 1500:
             continue
         region = labels[y:y+height, x:x+width] == label
-        # A whole molded groove wall can be darker in one photograph while
-        # retaining the same tall, wide shape across the two-pitch motif.
-        # Suppress that relief; a narrow irregular fissure remains eligible.
-        if (repeated_support is not None and width >= 10 and height >= 45
-                and height > width * 2
-                and float(np.mean(repeated_support[y:y+height, x:x+width][region])) >= .7):
+        # Even a short horizontal lip or a dark patch belongs to the molded
+        # pattern when its location repeats across pitches. Lighting can make
+        # one copy anomalously dark without turning it into damage.
+        if (repeated_support is not None and
+                float(np.mean(repeated_support[y:y+height, x:x+width][region])) >= .75):
             continue
         black_count = int(np.count_nonzero(region & (gray[y:y+height, x:x+width] <= core_limit)))
         black_fraction = black_count / area
@@ -437,10 +436,57 @@ def _is_sprocket_relief(candidate, hole_band, anchors, pitch_spacing, scale_x, s
     rim_distance = min(abs(cy - hole_band[0]), abs(cy - hole_band[1]))
     horizontal_lip = bw > bh * 1.8 and rim_distance < max(5, image_height * .025)
     inside_hole_band = hole_band[0] < cy < hole_band[1]
-    vertical_wall = (inside_hole_band and bh > bw * 4 and
-                     bh > (hole_band[1] - hole_band[0]) * .48 and
+    vertical_wall = (inside_hole_band and bh > bw * 4 and bh >= 5 and
                      float(np.min(np.abs(anchors - cx))) < pitch_spacing * .12)
     return horizontal_lip or vertical_wall
+
+
+def _black_core_fraction(original_gray, candidate, threshold):
+    """Measure real source pixels inside the displayed contour, not its box.
+
+    A low-resolution outline can surround a broad shaded patch even though
+    only a thin edge is near-black. Such a polygon must not contribute its
+    entire enclosed area to the damage tally.
+    """
+    polygon = np.rint(np.asarray(candidate['polygon'], np.float32)).astype(np.int32)
+    x, y, width, height = cv2.boundingRect(polygon)
+    if x < 0 or y < 0 or x + width > original_gray.shape[1] or y + height > original_gray.shape[0]:
+        return 0.
+    footprint = np.zeros((height, width), np.uint8)
+    cv2.fillPoly(footprint, [polygon - [x, y]], 1)
+    pixels = original_gray[y:y+height, x:x+width][footprint > 0]
+    return float(np.mean(pixels <= threshold)) if pixels.size else 0.
+
+
+def _persistent_vertical_shadow(original_gray, candidate, pixels_per_mm, pitch_px, core_limit):
+    """Reject a fragment of a molded groove that continues above and below it.
+
+    Limit this veto to repeated pitch geometry or the incomplete end pitches;
+    a localized vertical fissure must remain detectable.
+    """
+    x, y, width, height = candidate['bbox']
+    if height < max(25, width * 2) or not (
+            (candidate.get('repeated_structure_score') or 0) >= .4
+            or x < pitch_px or x + width > original_gray.shape[1] - pitch_px):
+        return False
+    center = round(x + width / 2)
+    side = max(round(pixels_per_mm * 7), round(width * .8), 8)
+    if center - side < 0 or center + side >= original_gray.shape[1]:
+        return False
+    span = max(50, round(pixels_per_mm * 30))
+
+    def persistence(top, bottom):
+        if bottom - top < min(35, span // 2):
+            return 0.
+        rows = original_gray[top:bottom]
+        center_dark = np.min(rows[:, center-2:center+3], axis=1)
+        sides = (rows[:, center-side].astype(np.float32) +
+                 rows[:, center+side].astype(np.float32)) / 2
+        return float(np.mean((center_dark <= core_limit + 13) & (sides - center_dark >= 15)))
+
+    top, bottom = round(y), round(y + height)
+    return (persistence(max(0, top-span), top) >= .5 and
+            persistence(bottom, min(original_gray.shape[0], bottom+span)) >= .5)
 
 
 def _filter_recurrent_anomalies(candidates, anchors, pitch_px, image_height, sensitivity,
@@ -511,9 +557,9 @@ def _fine_dark_candidates(original, authored, sections, zones, group, existing,
         # tear. Preserve only a convincingly black core in such mixed pixels.
         if halo_fraction > .25 and not (near_black / area >= .35 and mean_response >= 65):
             continue
-        # Repeated dark relief is weak evidence, but an especially black,
-        # locally contrasted line can still be damage on that same relief.
-        if structural_score >= .70 and not (near_black / area >= .23 and mean_response >= 55):
+        # Repeated molded relief is not a new fissure merely because one
+        # photograph makes its shadow blacker or sharper than its peers.
+        if structural_score >= .75:
             continue
         yy, xx = np.nonzero(region)
         covariance = np.cov(np.column_stack((xx, yy)).astype(np.float32), rowvar=False)
@@ -839,15 +885,19 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
                   if item['damage_type'] != 'chunk' or item['area_mm2'] >= CHUNK_MIN_AREA_MM2]
     fine = _fine_dark_candidates(original, authored, mask, zones, group,
                                  candidates, sensitivity)
-    stable = [item for item in fine if (item.get('repeated_structure_score') or 0) >= .70]
-    distinct = [item for item in fine if (item.get('repeated_structure_score') or 0) < .70]
-    candidates.extend(distinct + _filter_recurrent_anomalies(
-        stable, zones['pitch_anchors_x'], zones['pitch_px'], original.shape[0], sensitivity, 0.))
+    candidates.extend(fine)
     candidates = [item for item in candidates
                   if not _is_sprocket_relief(item, hole_band, anchor_positions,
                                              pitch_spacing, scale_x, scale_y, h)
                   and not (item['suggested_damage_type'] == 'chunk'
-                           and item['area_mm2'] < CHUNK_MIN_AREA_MM2)]
+                           and item['area_mm2'] < CHUNK_MIN_AREA_MM2)
+                  and (item['area_mm2'] < 10 or
+                       _black_core_fraction(original, item, core_limit) >= .20)
+                  and not _persistent_vertical_shadow(
+                      original, item, ppm, zones['pitch_px'], core_limit)
+                  and min(item['bbox'][0], item['bbox'][1],
+                          original.shape[1] - item['bbox'][0] - item['bbox'][2],
+                          original.shape[0] - item['bbox'][1] - item['bbox'][3]) >= 2]
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = candidates[:400]
     if previous and previous.get('group_id') == group_id and previous.get('zone_created_at') == zones['created_at']:

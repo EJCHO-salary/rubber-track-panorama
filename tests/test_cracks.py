@@ -8,7 +8,8 @@ from fastapi.testclient import TestClient
 from track_unwrap import api
 from track_unwrap.cracks import (_anomaly_candidates, _automatic_candidate, _dark_fissure_mask,
                                  _filter_recurrent_anomalies, _fine_dark_candidates,
-                                 _is_sprocket_relief,
+                                 _black_core_fraction, _is_sprocket_relief,
+                                 _persistent_vertical_shadow,
                                  _periodic_dark_anomaly, _polygon_overlap_fraction,
                                  _repeated_structure_support,
                                  _repair_narrow_authored_seams, _ridge_bridge,
@@ -27,7 +28,28 @@ def test_sprocket_lip_and_wall_are_not_damage_candidates():
                                                 anchors, 125., 3.5, 3.5, 643)
     assert geometry([126., 895.8, 199.5, 66.5])
     assert geometry([8344., 1025.3, 17.5, 185.5])
+    assert geometry([1006., 1020., 4., 20.])  # Short opening-wall fragment.
+    assert geometry([1006., 1032., 7., 73.5])
     assert not geometry([260., 1015., 45., 95.])  # irregular fissure beside the hole
+
+
+def test_displayed_area_needs_substantial_black_core_support():
+    gray = np.full((100, 100), 90, np.uint8)
+    gray[20:30, 20:30] = 48
+    broad = {'polygon': [[15, 15], [45, 15], [45, 45], [15, 45]]}
+    tight = {'polygon': [[20, 20], [30, 20], [30, 30], [20, 30]]}
+    assert _black_core_fraction(gray, broad, 72) < .20
+    assert _black_core_fraction(gray, tight, 72) > .80
+
+
+def test_molded_groove_continuity_is_not_a_localized_tear():
+    gray = np.full((500, 300), 140, np.uint8)
+    cv2.line(gray, (80, 10), (80, 490), 45, 5)
+    groove = {'bbox': [76, 200, 8, 70], 'repeated_structure_score': .55}
+    assert _persistent_vertical_shadow(gray, groove, 2.5, 50, 72)
+    gray[:180, 76:85] = 140
+    gray[290:, 76:85] = 140
+    assert not _persistent_vertical_shadow(gray, groove, 2.5, 50, 72)
 
 
 def _test_zones(folder, polygon=None):
@@ -168,6 +190,21 @@ def test_pitch_anomaly_discards_tall_repeated_groove_wall():
     repeated = np.zeros_like(gray, np.float32)
     repeated[20:100, 30:45] = .9
     assert not _anomaly_candidates(*args, repeated_support=repeated)
+
+
+def test_pitch_anomaly_discards_short_repeated_horizontal_lip():
+    gray = np.full((100, 160), 145, np.uint8)
+    gray[40:45, 25:90] = 25
+    response = np.zeros_like(gray)
+    response[40:45, 25:90] = 70
+    anomaly = np.zeros_like(gray)
+    anomaly[40:45, 25:90] = 65
+    mask = np.ones_like(gray, np.uint8)
+    group = {'sections': [{'id': 'surface'}]}
+    repeated = np.zeros_like(gray, np.float32)
+    repeated[40:45, 25:90] = .95
+    assert not _anomaly_candidates(gray, response, anomaly, mask, mask, group,
+                                   1., 1., 2.5, 72, 'normal', [], repeated)
 
 
 def test_anomaly_filter_keeps_isolated_crack_and_discards_repeating_relief():

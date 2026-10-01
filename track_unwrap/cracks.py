@@ -107,6 +107,36 @@ def _pattern_residual(response, anchors, scale_x):
     return residual
 
 
+def _periodic_dark_anomaly(gray, anchors, scale_x):
+    """Compare each pitch with the median of its alternating-pitch peers.
+
+    A genuine fissure can sit on a repeated lug or groove edge. Repetition
+    alone must not veto it when that particular pitch is substantially darker.
+    Per-row brightness correction avoids flagging a whole strip because one
+    photograph was lit differently.
+    """
+    h, w = gray.shape
+    positions = np.rint(np.asarray(anchors) / scale_x).astype(int)
+    anomaly = np.zeros((h, w), np.float32)
+    for parity in (0, 1):
+        spans = [(i, int(positions[i]), int(positions[i+1]))
+                 for i in range(len(positions)-1)
+                 if i % 2 == parity and 0 <= positions[i] < positions[i+1] <= w
+                 and positions[i+1]-positions[i] >= 20]
+        if len(spans) < 4:
+            continue
+        strips = np.stack([cv2.resize(gray[:, left:right], (128, h), interpolation=cv2.INTER_LINEAR)
+                           for _, left, right in spans]).astype(np.float32)
+        baseline = np.median(strips, axis=0)
+        for index, (_, left, right) in enumerate(spans):
+            difference = baseline - strips[index]
+            row_lighting = cv2.GaussianBlur(np.median(difference, axis=1)[:, None].astype(np.float32),
+                                            (1, 0), 0, sigmaY=20)
+            anomaly[:, left:right] = cv2.resize(difference - row_lighting, (right-left, h),
+                                                 interpolation=cv2.INTER_LINEAR)
+    return anomaly
+
+
 def _repeated_structure_support(gray, response, anchors, scale_x):
     """Estimate whether darkness recurs at the same location in other pitches.
 
@@ -191,6 +221,18 @@ def _suggest_damage_type(area_mm2, length_mm, elongation, bright_rim):
     return None, None
 
 
+def _automatic_candidate(section_id, polygon, bbox, area_mm2, length_mm,
+                         contrast, score, suggestion, reason, basis, repeated_score=None):
+    """One review schema shared by every automatic detection pass."""
+    return {'id': uuid4().hex[:12], 'section_id': section_id,
+            'polygon': polygon, 'bbox': bbox, 'area_mm2': area_mm2,
+            'length_mm': round(length_mm, 1), 'contrast': round(contrast, 1),
+            'score': round(score, 3), 'status': 'pending', 'source': 'automatic',
+            'damage_type': None, 'suggested_damage_type': suggestion,
+            'suggestion_reason': reason, 'decision_source': None,
+            'detection_basis': basis, 'repeated_structure_score': repeated_score}
+
+
 def _dark_fissure_mask(gray, response, zone_mask, sensitivity):
     """Require a connected near-black core, not merely local edge contrast.
 
@@ -231,6 +273,205 @@ def _inside_authored(candidate, authored, scale_x, scale_y):
     footprint = np.zeros((height, width), np.uint8)
     cv2.fillPoly(footprint, [contour - [x, y]], 1)
     return bool(np.any(footprint) and np.all(authored[y:y+height, x:x+width][footprint > 0] > 0))
+
+
+def _polygon_overlap_fraction(first, second, scale_x, scale_y):
+    """Share of a new proposal already covered by a prior proposal.
+
+    A short prior fragment must not hide a longer connected crack that contains
+    it. The denominator is the first (new) polygon, not the smaller polygon.
+    """
+    ax, ay, aw, ah = first['bbox']
+    bx, by, bw, bh = second['bbox']
+    if ax >= bx+bw or bx >= ax+aw or ay >= by+bh or by >= ay+ah:
+        return 0.
+    points_a = np.rint(np.asarray(first['polygon']) / [scale_x, scale_y]).astype(np.int32)
+    points_b = np.rint(np.asarray(second['polygon']) / [scale_x, scale_y]).astype(np.int32)
+    all_points = np.vstack((points_a, points_b))
+    x0, y0 = np.min(all_points, axis=0)
+    x1, y1 = np.max(all_points, axis=0) + 1
+    left = np.zeros((y1-y0, x1-x0), np.uint8)
+    right = np.zeros_like(left)
+    cv2.fillPoly(left, [points_a - [x0, y0]], 1)
+    cv2.fillPoly(right, [points_b - [x0, y0]], 1)
+    new_area = int(left.sum())
+    return float(np.count_nonzero(left & right) / new_area) if new_area else 0.
+
+
+def _anomaly_candidates(gray, raw_response, anomaly, mask, authored, group,
+                        scale_x, scale_y, pixels_per_mm, core_limit, sensitivity, existing):
+    """Recover near-black cracks that the repeated-geometry veto would miss."""
+    anomaly_limit = {'low': 34, 'normal': 26, 'high': 20}[sensitivity]
+    core = ((gray <= min(100, core_limit + 28)) & (anomaly >= anomaly_limit) &
+            (raw_response >= {'low': 20, 'normal': 15, 'high': 12}[sensitivity]) &
+            (authored > 0))
+    chalk_halo = cv2.dilate(np.uint8(gray >= 205), np.ones((5, 5), np.uint8)) > 0
+    core &= ~chalk_halo
+    binary = cv2.morphologyEx(np.uint8(core), cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    binary[authored == 0] = 0
+    # The authored mask excludes the openings themselves. Do not erase their
+    # entire horizontal band: rubber beside a hole can have a real crack.
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+    proposals = []
+    for label in range(1, count):
+        x, y, width, height, area = map(int, stats[label])
+        if area < 8 or area > 1500:
+            continue
+        region = labels[y:y+height, x:x+width] == label
+        black_count = int(np.count_nonzero(region & (gray[y:y+height, x:x+width] <= core_limit)))
+        black_fraction = black_count / area
+        if black_count < 4 or black_fraction < .30:
+            continue
+        mean_anomaly = float(np.mean(anomaly[y:y+height, x:x+width][region]))
+        compact_black_damage = black_fraction >= .30 and mean_anomaly >= 38
+        if max(width, height) < 7 and not compact_black_damage:
+            continue
+        yy, xx = np.nonzero(region)
+        covariance = np.cov(np.column_stack((xx, yy)).astype(np.float32), rowvar=False)
+        eigen = np.linalg.eigvalsh(covariance)
+        elongation = float(np.sqrt((eigen[1] + 1) / (eigen[0] + 1)))
+        if elongation < 1.8 and area < 30 and not compact_black_damage:
+            continue
+        contours, _ = cv2.findContours(np.uint8(region), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        outline = cv2.approxPolyDP(max(contours, key=cv2.contourArea), .5, True).reshape(-1, 2)
+        if len(outline) < 3:
+            continue
+        polygon = [[round((x+float(px))*scale_x, 1), round((y+float(py))*scale_y, 1)]
+                   for px, py in outline]
+        candidate = {'polygon': polygon, 'bbox': [round(x*scale_x, 1), round(y*scale_y, 1),
+                                                   round(width*scale_x, 1), round(height*scale_y, 1)]}
+        if not _inside_authored(candidate, authored, scale_x, scale_y):
+            continue
+        if any(_polygon_overlap_fraction(candidate, prior, scale_x, scale_y) >= .45
+               for prior in existing):
+            continue
+        codes = mask[y:y+height, x:x+width][region]
+        section_code = int(np.bincount(codes, minlength=len(group['sections'])+1)[1:].argmax() + 1)
+        if not 1 <= section_code <= len(group['sections']):
+            continue
+        length_mm = float(np.sqrt(eigen[1]) * 3.5 * np.sqrt(scale_x*scale_y) / pixels_per_mm)
+        area_mm2 = round(_polygon_area(polygon) / pixels_per_mm**2, 2)
+        contrast = float(np.mean(raw_response[y:y+height, x:x+width][region]))
+        score = round(min(.8, (mean_anomaly / 85)
+                                * min(1., black_fraction / .5) * min(1., elongation / 4)), 3)
+        suggestion, reason = _suggest_damage_type(area_mm2, length_mm, elongation, 0.)
+        proposals.append(_automatic_candidate(group['sections'][section_code-1]['id'],
+                                              polygon, candidate['bbox'], area_mm2, length_mm,
+                                              contrast, score, suggestion, reason,
+                                              'pitch_dark_anomaly'))
+    return proposals
+
+
+def _filter_recurrent_anomalies(candidates, anchors, pitch_px, image_height, sensitivity,
+                                minimum_score=None):
+    """Reject dark relief repeated at the same place in several pitches.
+
+    A single damaged groove can be darker than its pitch template, while a
+    recurring groove wall is track geometry. Compare proposal locations in
+    pitch coordinates rather than applying a blanket groove exclusion.
+    """
+    if not candidates or len(anchors) < 3:
+        return candidates
+    occurrences = {}
+    locations = []
+    for candidate in candidates:
+        x, y, width, height = candidate['bbox']
+        center_x, center_y = x + width / 2, y + height / 2
+        index = int(np.argmin(np.abs(np.asarray(anchors) - center_x)))
+        phase = round((center_x - anchors[index]) / pitch_px / .1)
+        row = round(center_y / image_height / .1)
+        key = phase, row
+        locations.append(key)
+        occurrences.setdefault(key, set()).add(index)
+    if minimum_score is None:
+        minimum_score = {'low': .28, 'normal': .20, 'high': .10}[sensitivity]
+    return [candidate for candidate, key in zip(candidates, locations)
+            if candidate['score'] >= minimum_score and len(occurrences[key]) < 3]
+
+
+def _fine_dark_candidates(original, authored, sections, zones, group, existing,
+                          sensitivity):
+    """Recover narrow near-black fissures lost in the compact zone canvas."""
+    _, source_w = authored.shape
+    working_w = min(original.shape[1], 6000, round(source_w * 1.75))
+    if working_w <= source_w:
+        return []
+    working_h = round(original.shape[0] * working_w / original.shape[1])
+    scale_x, scale_y = original.shape[1] / working_w, original.shape[0] / working_h
+    gray = cv2.resize(original, (working_w, working_h), interpolation=cv2.INTER_AREA)
+    valid = cv2.resize(authored, (working_w, working_h), interpolation=cv2.INTER_NEAREST)
+    section_mask = cv2.resize(sections, (working_w, working_h), interpolation=cv2.INTER_NEAREST)
+    response = np.maximum(
+        cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))),
+        cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19))))
+    repeated = _repeated_structure_support(gray, response, zones['pitch_anchors_x'], scale_x)
+    black_limit = {'low': 80, 'normal': 90, 'high': 100}[sensitivity]
+    contrast_limit = {'low': 33, 'normal': 25, 'high': 18}[sensitivity]
+    binary = np.uint8((gray <= black_limit) & (response >= contrast_limit) & (valid > 0))
+    halo = cv2.dilate(np.uint8(gray >= 205), np.ones((5, 5), np.uint8)) > 0
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    binary[valid == 0] = 0
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+    proposals = []
+    ppm = float(zones['nominal_pixels_per_mm'])
+    for label in range(1, count):
+        x, y, width, height, area = map(int, stats[label])
+        if area < 8 or area > 300 or max(width, height) < 10:
+            continue
+        region = labels[y:y+height, x:x+width] == label
+        patch = gray[y:y+height, x:x+width]
+        near_black = int(np.count_nonzero(region & (patch <= 60)))
+        if near_black < 3 or near_black / area < .18:
+            continue
+        structural_score = float(np.mean(repeated[y:y+height, x:x+width][region]))
+        mean_response = float(np.mean(response[y:y+height, x:x+width][region]))
+        halo_fraction = float(np.count_nonzero(region & halo[y:y+height, x:x+width]) / area)
+        # A chalk stroke is bright, but its white rim can also border a deep
+        # tear. Preserve only a convincingly black core in such mixed pixels.
+        if halo_fraction > .25 and not (near_black / area >= .35 and mean_response >= 65):
+            continue
+        # Repeated dark relief is weak evidence, but an especially black,
+        # locally contrasted line can still be damage on that same relief.
+        if structural_score >= .70 and not (near_black / area >= .23 and mean_response >= 55):
+            continue
+        yy, xx = np.nonzero(region)
+        covariance = np.cov(np.column_stack((xx, yy)).astype(np.float32), rowvar=False)
+        eigen = np.linalg.eigvalsh(covariance)
+        elongation = float(np.sqrt((eigen[1] + 1) / (eigen[0] + 1)))
+        if elongation < 1.8:
+            continue
+        contours, _ = cv2.findContours(np.uint8(region), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        outline = cv2.approxPolyDP(max(contours, key=cv2.contourArea), .5, True).reshape(-1, 2)
+        if len(outline) < 3:
+            continue
+        polygon = [[round((x+float(px))*scale_x, 1), round((y+float(py))*scale_y, 1)]
+                   for px, py in outline]
+        candidate = {'polygon': polygon, 'bbox': [round(x*scale_x, 1), round(y*scale_y, 1),
+                                                   round(width*scale_x, 1), round(height*scale_y, 1)]}
+        if not _inside_authored(candidate, valid, scale_x, scale_y):
+            continue
+        if any(_polygon_overlap_fraction(candidate, prior, scale_x, scale_y) >= .45
+               for prior in existing):
+            continue
+        codes = section_mask[y:y+height, x:x+width][region]
+        section_code = int(np.bincount(codes, minlength=len(group['sections'])+1)[1:].argmax() + 1)
+        if not 1 <= section_code <= len(group['sections']):
+            continue
+        length_mm = float(np.sqrt(eigen[1]) * 3.5 * np.sqrt(scale_x*scale_y) / ppm)
+        area_mm2 = round(_polygon_area(polygon) / ppm**2, 2)
+        contrast = mean_response
+        score = round(min(.75, (contrast / 120) * min(elongation / 4, 1) *
+                          min(1., near_black / area / .35)), 3)
+        suggestion, reason = _suggest_damage_type(area_mm2, length_mm, elongation, 0.)
+        proposals.append(_automatic_candidate(group['sections'][section_code-1]['id'],
+                                              polygon, candidate['bbox'], area_mm2, length_mm,
+                                              contrast, score, suggestion, reason,
+                                              'fine_dark_core', round(structural_score, 2)))
+    return proposals
 
 
 def _ridge_bridge(gray, response, valid, first, second, max_gap):
@@ -423,6 +664,7 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
     response = np.maximum(
         cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))),
         cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19))))
+    raw_response = response
     scale_x, scale_y = original.shape[1] / w, original.shape[0] / h
     repeated_support = _repeated_structure_support(gray, response, zones['pitch_anchors_x'], scale_x)
     hole_band = _periodic_hole_band(gray, zones['pitch_anchors_x'], scale_x)
@@ -474,7 +716,7 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
         if not contours:
             continue
         outline = max(contours, key=cv2.contourArea)
-        outline = cv2.approxPolyDP(outline, 1.2, True).reshape(-1, 2)
+        outline = cv2.approxPolyDP(outline, .5, True).reshape(-1, 2)
         if len(outline) < 3:
             continue
         contrast = float(np.mean(response[y:y+bh, x:x+bw][roi]))
@@ -487,17 +729,26 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
         area_mm2 = round(_polygon_area(polygon) / ppm ** 2, 2)
         suggestion, reason = _suggest_damage_type(
             area_mm2, length_mm, elongation, _bright_rim_fraction(gray, labels, label, x, y, bw, bh))
-        candidates.append({'id': uuid4().hex[:12], 'section_id': group['sections'][section_code-1]['id'],
-                           'polygon': polygon, 'status': 'pending', 'source': 'automatic', 'damage_type': None,
-                           'suggested_damage_type': suggestion, 'suggestion_reason': reason,
-                           'repeated_structure_score': round(structural_score, 2),
-                           'decision_source': None,
-                           'length_mm': round(length_mm, 1), 'contrast': round(contrast, 1), 'score': score,
-                           'area_mm2': area_mm2,
-                           'bbox': [round(x*scale_x, 1), round(y*scale_y, 1), round(bw*scale_x, 1), round(bh*scale_y, 1)]})
+        candidates.append(_automatic_candidate(
+            group['sections'][section_code-1]['id'], polygon,
+            [round(x*scale_x, 1), round(y*scale_y, 1), round(bw*scale_x, 1), round(bh*scale_y, 1)],
+            area_mm2, length_mm, contrast, score, suggestion, reason, 'dark_core',
+            round(structural_score, 2)))
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = _merge_continuous_candidates(candidates[:400], gray, response, authored,
                                                scale_x, scale_y, ppm)
+    anomaly = _periodic_dark_anomaly(gray, zones['pitch_anchors_x'], scale_x)
+    anomalous = _anomaly_candidates(gray, raw_response, anomaly, mask, authored, group,
+                                    scale_x, scale_y, ppm, core_limit, sensitivity,
+                                          candidates)
+    candidates.extend(_filter_recurrent_anomalies(
+        anomalous, zones['pitch_anchors_x'], zones['pitch_px'], original.shape[0], sensitivity))
+    fine = _fine_dark_candidates(original, authored, mask, zones, group,
+                                 candidates, sensitivity)
+    stable = [item for item in fine if (item.get('repeated_structure_score') or 0) >= .70]
+    distinct = [item for item in fine if (item.get('repeated_structure_score') or 0) < .70]
+    candidates.extend(distinct + _filter_recurrent_anomalies(
+        stable, zones['pitch_anchors_x'], zones['pitch_px'], original.shape[0], sensitivity, 0.))
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = candidates[:400]
     if previous and previous.get('group_id') == group_id and previous.get('zone_created_at') == zones['created_at']:

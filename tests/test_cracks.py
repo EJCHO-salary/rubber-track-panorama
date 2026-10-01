@@ -6,7 +6,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from track_unwrap import api
-from track_unwrap.cracks import (_dark_fissure_mask, _repeated_structure_support,
+from track_unwrap.cracks import (_anomaly_candidates, _dark_fissure_mask,
+                                 _filter_recurrent_anomalies, _fine_dark_candidates,
+                                 _periodic_dark_anomaly, _polygon_overlap_fraction,
+                                 _repeated_structure_support,
                                  _repair_narrow_authored_seams, _ridge_bridge,
                                  _trace_dark_component,
                                  _suggest_damage_type, add_manual_crack,
@@ -112,6 +115,62 @@ def test_repeated_geometry_does_not_suppress_unique_fissure():
     support = _repeated_structure_support(gray, response, list(range(0, 501, 50)), 1.)
     assert support[30, 62] >= .75
     assert support[80, 283] < .2
+
+
+def test_pitch_anomaly_recovers_one_deep_crack_on_a_repeated_edge():
+    gray = np.full((120, 500), 150, np.uint8)
+    for x in range(0, 500, 50):
+        cv2.line(gray, (x+12, 20), (x+12, 95), 80, 3)
+    cv2.line(gray, (12, 35), (12, 85), 12, 3)
+    anchors = list(range(0, 501, 50))
+    anomaly = _periodic_dark_anomaly(gray, anchors, 1.)
+    assert anomaly[55, 12] > 35
+    assert abs(float(anomaly[55, 112])) < 10
+    response = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT,
+                                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19)))
+    group = {'sections': [{'id': 'rubber'}]}
+    candidates = _anomaly_candidates(gray, response, anomaly, np.ones_like(gray),
+                                     np.ones_like(gray), group, 1., 1., 2., 72,
+                                     'normal', [])
+    assert any(c['bbox'][0] <= 12 <= c['bbox'][0]+c['bbox'][2] for c in candidates)
+    assert not any(c['bbox'][0] <= 112 <= c['bbox'][0]+c['bbox'][2] for c in candidates)
+    outside = np.zeros_like(gray)
+    assert _anomaly_candidates(gray, response, anomaly, np.ones_like(gray),
+                               outside, group, 1., 1., 2., 72,
+                               'normal', []) == []
+
+
+def test_anomaly_filter_keeps_isolated_crack_and_discards_repeating_relief():
+    def candidate(identifier, x, y, score):
+        return {'id': identifier, 'bbox': [x, y, 5, 30], 'score': score}
+    proposals = [candidate(f'wall-{i}', i*50 + 10, 10, .6) for i in range(4)]
+    proposals += [candidate('unique-crack', 210, 70, .44),
+                  candidate('weak-noise', 260, 70, .15)]
+    kept = _filter_recurrent_anomalies(proposals, list(range(0, 501, 50)),
+                                       50, 120, 'normal')
+    assert [item['id'] for item in kept] == ['unique-crack']
+
+
+def test_short_existing_fragment_does_not_suppress_longer_crack():
+    short = {'bbox': [10, 10, 4, 10], 'polygon': [[10, 10], [14, 10], [14, 20], [10, 20]]}
+    long = {'bbox': [10, 10, 4, 50], 'polygon': [[10, 10], [14, 10], [14, 60], [10, 60]]}
+    assert _polygon_overlap_fraction(long, short, 1, 1) < .45
+    assert _polygon_overlap_fraction(short, long, 1, 1) >= .95
+
+
+def test_fine_pass_finds_small_dark_line_only_inside_authored_area():
+    original = np.full((180, 400), 150, np.uint8)
+    cv2.line(original, (35, 45), (35, 105), 12, 2)
+    cv2.line(original, (39, 45), (39, 105), 230, 1)  # Bright edge beside a real black fissure.
+    cv2.line(original, (320, 45), (320, 105), 12, 2)
+    authored = np.zeros((90, 200), np.uint8)
+    authored[:, :100] = 1
+    zones = {'pitch_anchors_x': list(range(0, 401, 50)), 'nominal_pixels_per_mm': 2.}
+    group = {'sections': [{'id': 'rubber'}]}
+    candidates = _fine_dark_candidates(original, authored, np.ones_like(authored),
+                                       zones, group, [], 'normal')
+    assert any(c['bbox'][0] <= 35 <= c['bbox'][0]+c['bbox'][2] for c in candidates)
+    assert all(c['bbox'][0] + c['bbox'][2] < 200 for c in candidates)
 
 
 def test_damage_type_hint_requires_geometry_and_exposed_edge():

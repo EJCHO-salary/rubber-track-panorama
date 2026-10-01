@@ -126,7 +126,8 @@ export interface CrackCandidate {
   decision_source?: 'manual' | 'auto' | null
   suggested_damage_type?: 'chunk' | 'tear' | 'chip_cut' | null
   suggestion_reason?: string | null
-  repeated_structure_score?: number
+  repeated_structure_score?: number | null
+  detection_basis?: 'dark_core' | 'pitch_dark_anomaly' | 'fine_dark_core'
   area_mm2?: number
   length_mm: number
   contrast: number

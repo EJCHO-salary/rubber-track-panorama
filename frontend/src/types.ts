@@ -169,5 +169,6 @@ export interface CrackReview {
   accepted_by_type?: Record<'chunk' | 'tear' | 'unclassified', number>
   accepted_area_by_type?: Record<'chunk' | 'tear', number>
   chunk_min_area_mm2?: number
+  tear_min_length_mm?: number
   last_review?: { selected: number; auto_accepted: number }
 }

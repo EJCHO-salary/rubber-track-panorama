@@ -359,6 +359,25 @@ def test_verified_small_dark_loss_survives_review_reload(tmp_path):
     assert loaded['candidates'][0]['id'] == 'small_pit'
 
 
+def test_automatic_tears_below_one_centimeter_are_not_counted(tmp_path):
+    folder = tmp_path / 'cracks'
+    folder.mkdir()
+    base = {'section_id': 'surface', 'polygon': [[0, 0], [20, 0], [20, 2], [0, 2]],
+            'bbox': [0, 0, 20, 2], 'area_mm2': 2, 'status': 'accepted',
+            'source': 'automatic', 'damage_type': 'tear', 'suggested_damage_type': 'tear'}
+    review = {'version': 2, 'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866'}],
+              'pixels_per_mm': 2.5,
+              'candidates': [dict(base, id='short_auto', length_mm=9.9, decision_source='auto'),
+                             dict(base, id='at_limit', length_mm=10, decision_source='auto'),
+                             dict(base, id='short_reviewed', length_mm=4,
+                                  decision_source='manual')]}
+    (folder / 'review.json').write_text(json.dumps(review), encoding='utf-8')
+    loaded = load_cracks(tmp_path)
+    assert loaded['tear_min_length_mm'] == 10
+    assert {item['id'] for item in loaded['candidates']} == {'at_limit', 'short_reviewed'}
+    assert loaded['accepted_by_type']['tear'] == 2
+
+
 def test_chalk_colour_change_does_not_produce_automatic_chunk(tmp_path):
     color = np.full((120, 500, 3), 155, np.uint8)
     cv2.putText(color, '10', (180, 60), cv2.FONT_HERSHEY_SIMPLEX, 1., (235, 235, 235), 3)

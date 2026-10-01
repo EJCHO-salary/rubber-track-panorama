@@ -247,7 +247,7 @@ export default function CrackWorkspace() {
         </div>
       </section>
       <aside className={styles.sidePanel}>
-        <div className={styles.sideTitle}><span>LIVE SUMMARY</span><strong>손상 집계</strong><small>자동 분류는 초안이며 이미지에서 바로 수정할 수 있습니다.</small></div>
+        <div className={styles.sideTitle}><span>LIVE SUMMARY</span><strong>손상 집계</strong><small>자동 티어는 길이 {formatNumber(data.tear_min_length_mm ?? 10)} mm 이상만 집계합니다. 작은 손상은 사진에서 직접 지정할 수 있습니다.</small></div>
         <div className={styles.stats}><div><strong>{formatNumber(data.totals?.accepted ?? 0)}</strong><small>집계</small></div><div><strong>{formatNumber(autoCount)}</strong><small>자동 분류</small></div><div><strong>{formatNumber(editedCount)}</strong><small>사용자 수정</small></div></div>
         <div className={styles.typeCounts}><strong>손상 유형별 집계</strong>{damageTypes.map(item => <div key={item.id}><span>{item.label}</span><b>{formatNumber(data.accepted_by_type?.[item.id] ?? 0)}건 <small>· {formatNumber(data.accepted_area_by_type?.[item.id] ?? 0)} mm²</small></b></div>)}</div>
         <div className={styles.sectionCounts}><strong>영역별 집계</strong>{data.sections?.map(section => <div key={section.id}><span><i style={{ background: section.color }} />{section.name}</span><small title="후보별 표시 면적 합계입니다. 겹친 윤곽은 중복될 수 있습니다.">{data.summary?.[section.id]?.accepted ?? 0}건 · {formatNumber(data.summary?.[section.id]?.area_mm2 ?? 0)} mm²</small></div>)}</div>

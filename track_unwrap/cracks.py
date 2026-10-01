@@ -16,12 +16,22 @@ from .zones import load_zones
 
 DAMAGE_TYPES = {'chunk', 'tear'}
 CHUNK_MIN_AREA_MM2 = 100.  # 1 cm² in calibrated panorama coordinates.
+TEAR_MIN_LENGTH_MM = 10.  # Only automatically count tears at least 1 cm long.
 AUTO_COMPACT_MIN_AREA_MM2 = 6.  # Smaller marks are not reliable at both panorama resolutions.
 
 
 def _paths(result_dir):
     folder = Path(result_dir) / 'cracks'
     return folder, folder / 'review.json'
+
+
+def _short_automatic_tear(item):
+    """Keep explicit user decisions, but discard undersized automatic tears."""
+    return (item.get('source') == 'automatic'
+            and item.get('decision_source') != 'manual'
+            and item.get('status') != 'excluded'
+            and item.get('damage_type') == 'tear'
+            and item.get('length_mm', 0) < TEAR_MIN_LENGTH_MM)
 
 
 def load_cracks(result_dir):
@@ -68,7 +78,8 @@ def load_cracks(result_dir):
     # including chalk and lighting. A user-drawn or explicitly reviewed mark
     # is always retained, even when smaller than the automatic size threshold.
     data['candidates'] = [item for item in data.get('candidates', [])
-                          if not (item.get('source') == 'automatic'
+                          if not _short_automatic_tear(item)
+                          and not (item.get('source') == 'automatic'
                                   and item.get('decision_source') != 'manual'
                                   and item.get('status') != 'excluded'
                                   and (item.get('detection_basis') == 'material_change'
@@ -103,6 +114,7 @@ def _write(result_dir, data):
 
 def _summary(data):
     data['chunk_min_area_mm2'] = CHUNK_MIN_AREA_MM2
+    data['tear_min_length_mm'] = TEAR_MIN_LENGTH_MM
     sections = {item['id']: {'proposed': 0, 'accepted': 0, 'excluded': 0,
                              'length_mm': 0., 'area_mm2': 0.}
                 for item in data['sections']}
@@ -1151,6 +1163,9 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
     candidates = ([item for item in candidates if item['damage_type'] != 'tear'] +
                   _merge_continuous_candidates(tears, gray, raw_response, authored,
                                                scale_x, scale_y, ppm))
+    # Join adjacent fissure fragments first, then enforce the physical length
+    # threshold on the resulting automatic candidates.
+    candidates = [item for item in candidates if not _short_automatic_tear(item)]
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = candidates[:400]
     if previous and previous.get('group_id') == group_id and previous.get('zone_created_at') == zones['created_at']:

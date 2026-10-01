@@ -6,7 +6,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from track_unwrap import api
-from track_unwrap.cracks import (_anomaly_candidates, _automatic_candidate, _dark_fissure_mask,
+from track_unwrap.cracks import (_anomaly_candidates, _automatic_candidate, _compact_dark_loss_candidates,
+                                 _dark_fissure_mask, _directional_tear_extensions,
                                  _filter_recurrent_anomalies, _fine_dark_candidates,
                                  _black_core_fraction, _is_sprocket_relief,
                                  _persistent_vertical_shadow,
@@ -40,6 +41,66 @@ def test_displayed_area_needs_substantial_black_core_support():
     tight = {'polygon': [[20, 20], [30, 20], [30, 30], [20, 30]]}
     assert _black_core_fraction(gray, broad, 72) < .20
     assert _black_core_fraction(gray, tight, 72) > .80
+
+
+def test_compact_black_losses_survive_below_one_square_centimeter():
+    gray = np.full((160, 160), 150, np.uint8)
+    binary = np.zeros_like(gray)
+    response = np.zeros_like(gray)
+    anomaly = np.zeros_like(gray)
+    for x, y, size in ((20, 20, 10), (70, 70, 8), (120, 120, 6)):
+        gray[y:y+size, x:x+size] = 42
+        binary[y:y+size, x:x+size] = 1
+        response[y:y+size, x:x+size] = 95
+        anomaly[y:y+size, x:x+size] = 65
+    repeated = np.full_like(gray, .78, dtype=np.float32)
+    mask = np.ones_like(gray)
+    authored = np.full_like(gray, 255)
+    group = {'sections': [{'id': 'rubber'}]}
+    found = _compact_dark_loss_candidates(gray, binary, response, anomaly,
+                                          repeated, mask, authored, group,
+                                          1., 1., 2.5, 72, [])
+    assert sorted(round(c['bbox'][0]) for c in found) == [20, 70]
+    assert all(c['damage_type'] == 'chunk' and 6 <= c['area_mm2'] < 100 for c in found)
+
+
+def test_small_elongated_dark_loss_is_tear_not_chunk():
+    gray = np.full((100, 100), 150, np.uint8)
+    binary = np.zeros_like(gray)
+    cv2.line(binary, (20, 20), (20, 36), 1, 3)
+    cv2.line(binary, (20, 20), (26, 20), 1, 3)
+    gray[binary > 0] = 35
+    response = np.where(binary > 0, 95, 0).astype(np.uint8)
+    anomaly = np.where(binary > 0, 65, 0).astype(np.uint8)
+    found = _compact_dark_loss_candidates(
+        gray, binary, response, anomaly, np.full_like(gray, .5, dtype=np.float32),
+        np.ones_like(gray), np.full_like(gray, 255),
+        {'sections': [{'id': 'rubber'}]}, 3.5, 3.5, 5., 72, [])
+    assert len(found) == 1
+    assert found[0]['damage_type'] == 'tear'
+
+
+def test_diagonal_tear_extends_from_black_seed_into_lighter_continuous_ridge():
+    gray = np.full((250, 250), 180, np.uint8)
+    response = np.zeros_like(gray)
+    cv2.line(gray, (40, 175), (170, 70), 110, 3)
+    cv2.line(response, (40, 175), (170, 70), 45, 3)
+    core = np.zeros_like(gray)
+    cv2.line(core, (140, 95), (170, 70), 1, 3)
+    gray[core > 0] = 40
+    response[core > 0] = 100
+    contour = max(cv2.findContours(core, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0],
+                  key=cv2.contourArea).reshape(-1, 2)
+    polygon = contour.tolist()
+    candidate = _automatic_candidate('rubber', polygon, [138, 68, 35, 30],
+                                     18., 20., 80., .8, 'tear', 'test', 'dark_core', .2)
+    found = _directional_tear_extensions([candidate], gray, response,
+                                         np.full_like(gray, 255),
+                                         np.zeros_like(gray, dtype=np.float32),
+                                         1., 1., 2.5)
+    assert found[0]['detection_basis'] == 'extended_dark_ridge'
+    assert found[0]['bbox'][0] < 60
+    assert found[0]['area_mm2'] > candidate['area_mm2']
 
 
 def test_molded_groove_continuity_is_not_a_localized_tear():
@@ -279,6 +340,23 @@ def test_small_automatic_loss_is_removed_and_legacy_manual_decision_survives(tmp
     assert by_id['user']['status'] == 'accepted' and by_id['user']['damage_type'] == 'chunk'
     assert by_id['tear_override']['damage_type'] == 'tear'
     assert migrated['accepted_area_by_type'] == {'chunk': 64, 'tear': 64}
+
+
+def test_verified_small_dark_loss_survives_review_reload(tmp_path):
+    folder = tmp_path / 'cracks'
+    folder.mkdir()
+    candidate = {'id': 'small_pit', 'section_id': 'surface',
+                 'polygon': [[0, 0], [10, 0], [10, 10], [0, 10]],
+                 'bbox': [0, 0, 10, 10], 'area_mm2': 16, 'length_mm': 4,
+                 'status': 'accepted', 'source': 'automatic',
+                 'damage_type': 'chunk', 'suggested_damage_type': 'chunk',
+                 'decision_source': 'auto', 'detection_basis': 'compact_dark_loss'}
+    review = {'version': 2, 'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866'}],
+              'pixels_per_mm': 2.5, 'candidates': [candidate]}
+    (folder / 'review.json').write_text(json.dumps(review), encoding='utf-8')
+    loaded = load_cracks(tmp_path)
+    assert loaded['accepted_by_type']['chunk'] == 1
+    assert loaded['candidates'][0]['id'] == 'small_pit'
 
 
 def test_chalk_colour_change_does_not_produce_automatic_chunk(tmp_path):

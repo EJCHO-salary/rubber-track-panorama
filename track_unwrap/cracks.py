@@ -16,6 +16,7 @@ from .zones import load_zones
 
 DAMAGE_TYPES = {'chunk', 'tear'}
 CHUNK_MIN_AREA_MM2 = 100.  # 1 cm² in calibrated panorama coordinates.
+AUTO_COMPACT_MIN_AREA_MM2 = 6.  # Smaller marks are not reliable at both panorama resolutions.
 
 
 def _paths(result_dir):
@@ -73,7 +74,8 @@ def load_cracks(result_dir):
                                   and (item.get('detection_basis') == 'material_change'
                                        or item.get('suggested_damage_type') == 'chunk'
                                        and (item.get('status') == 'pending'
-                                            or item.get('area_mm2', 0) < CHUNK_MIN_AREA_MM2)))]
+                                            or item.get('area_mm2', 0) < CHUNK_MIN_AREA_MM2)
+                                       and item.get('detection_basis') != 'compact_dark_loss'))]
     data['version'] = 2
     return _summary(data)
 
@@ -415,6 +417,79 @@ def _anomaly_candidates(gray, raw_response, anomaly, mask, authored, group,
                                               polygon, candidate['bbox'], area_mm2, length_mm,
                                               contrast, score, suggestion, reason,
                                               'pitch_dark_anomaly'))
+    return proposals
+
+
+def _compact_dark_loss_candidates(gray, binary, response, anomaly, repeated,
+                                  mask, authored, group, scale_x, scale_y, ppm,
+                                  core_limit, existing):
+    """Find small isolated cavities by their dark core and local contrast.
+
+    The 1 cm² reference is a size descriptor, not proof that a smaller,
+    visibly missing piece of rubber is intact. Compact holes are assessed
+    separately from long fissures and repeated molded relief.
+    """
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+    proposals = []
+    for label in range(1, count):
+        x, y, width, height, area = map(int, stats[label])
+        if not (16 <= area <= 250 and 4 <= width <= 28 and 4 <= height <= 28
+                and max(width, height) / min(width, height) <= 2.7):
+            continue
+        region = labels[y:y+height, x:x+width] == label
+        patch = gray[y:y+height, x:x+width]
+        black = int(np.count_nonzero(region & (patch <= core_limit)))
+        if black < 5 or black / area < .16:
+            continue
+        novelty = float(np.mean(anomaly[y:y+height, x:x+width][region]))
+        contrast = float(np.mean(response[y:y+height, x:x+width][region]))
+        structure = float(np.mean(repeated[y:y+height, x:x+width][region]))
+        if novelty < 44 or contrast < 55 or (structure >= .85 and novelty < 62):
+            continue
+        pad = 4
+        x0, y0 = max(0, x-pad), max(0, y-pad)
+        x1, y1 = min(gray.shape[1], x+width+pad), min(gray.shape[0], y+height+pad)
+        footprint = np.uint8(labels[y0:y1, x0:x1] == label)
+        ring = (cv2.dilate(footprint, np.ones((7, 7), np.uint8)) > 0) & (footprint == 0)
+        if not np.any(ring) or (np.median(gray[y0:y1, x0:x1][ring]) -
+                                np.median(patch[region])) < 24:
+            continue
+        contours, _ = cv2.findContours(np.uint8(region), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        outline = cv2.approxPolyDP(max(contours, key=cv2.contourArea), .5, True).reshape(-1, 2)
+        if len(outline) < 3:
+            continue
+        polygon = [[round((x + float(px))*scale_x, 1), round((y + float(py))*scale_y, 1)]
+                   for px, py in outline]
+        bbox = [round(x*scale_x, 1), round(y*scale_y, 1),
+                round(width*scale_x, 1), round(height*scale_y, 1)]
+        candidate = {'polygon': polygon, 'bbox': bbox}
+        if not _inside_authored(candidate, authored, scale_x, scale_y):
+            continue
+        if any(_polygon_overlap_fraction(candidate, prior, scale_x, scale_y) >= .35
+               for prior in existing + proposals):
+            continue
+        codes = mask[y:y+height, x:x+width][region]
+        section_code = int(np.bincount(codes, minlength=len(group['sections'])+1)[1:].argmax()+1)
+        if not 1 <= section_code <= len(group['sections']):
+            continue
+        area_mm2 = round(_polygon_area(polygon)/ppm**2, 2)
+        if area_mm2 < AUTO_COMPACT_MIN_AREA_MM2 or area_mm2 >= CHUNK_MIN_AREA_MM2:
+            continue
+        length_mm = max(width*scale_x, height*scale_y)/ppm
+        yy, xx = np.nonzero(region)
+        eigen = np.linalg.eigvalsh(np.cov(np.column_stack((xx, yy)).T))
+        elongation = float(np.sqrt(eigen[1]/max(eigen[0], .01)))
+        damage_type = ('tear' if length_mm >= 8 and elongation >= 2.3
+                       and area_mm2/max(length_mm, .1) <= 3.5 else 'chunk')
+        reason = ('짙은 중심이 길고 좁게 이어진 국소 균열입니다.' if damage_type == 'tear'
+                  else '작지만 국소적으로 깊은 검정 중심과 주변 고무의 결손 경계가 보입니다.')
+        score = min(.85, novelty/90 * black/area * 1.5)
+        proposals.append(_automatic_candidate(
+            group['sections'][section_code-1]['id'], polygon, bbox, area_mm2,
+            length_mm, contrast, score, damage_type, reason,
+            'compact_dark_loss', round(structure, 2)))
     return proposals
 
 
@@ -766,6 +841,167 @@ def _merge_continuous_candidates(candidates, gray, response, authored,
     return merged
 
 
+def _directional_tear_extensions(candidates, gray, response, authored, repeated,
+                                 scale_x, scale_y, pixels_per_mm, hole_band=None):
+    """Continue a black-seeded diagonal tear through locally dark, aligned ridges.
+
+    The seed must be an accepted black-core fissure. A weak extension must have
+    the same direction and an image-supported bridge; a broad molded shadow
+    cannot become a new tear solely because it is dark.
+    """
+    weak = np.uint8((gray <= 145) & (response >= 14) & (authored > 0))
+    angles = (-60, -45, -30, -15, 15, 30, 45, 60)
+    result = []
+    for candidate in candidates:
+        if (candidate.get('detection_basis') != 'dark_core' or
+                candidate.get('damage_type') != 'tear' or
+                not 15 <= candidate['length_mm'] <= 80 or
+                candidate['area_mm2'] >= CHUNK_MIN_AREA_MM2 or
+                (candidate.get('repeated_structure_score') or 0) >= .7):
+            result.append(candidate)
+            continue
+        points = np.asarray(candidate['polygon'], np.float32) / [scale_x, scale_y]
+        if len(points) < 4:
+            result.append(candidate)
+            continue
+        eigenvalues, vectors = np.linalg.eigh(np.cov(points.T))
+        axis = vectors[:, 1]
+        angle = (np.degrees(np.arctan2(axis[1], axis[0])) + 90) % 180 - 90
+        if abs(angle) < 14 or abs(angle) > 70 or eigenvalues[1] < eigenvalues[0] * 2:
+            result.append(candidate)
+            continue
+        orientations = [value for value in angles if abs(value-angle) <= 21]
+        if not orientations:
+            result.append(candidate)
+            continue
+        bx, by, bw, bh = candidate['bbox']
+        if hole_band and by/scale_y < hole_band[1]+10 and (by+bh)/scale_y > hole_band[0]-10:
+            result.append(candidate)
+            continue
+        left = max(0, round(bx/scale_x)-170)
+        top = max(0, round(by/scale_y)-170)
+        right = min(gray.shape[1], round((bx+bw)/scale_x)+170)
+        bottom = min(gray.shape[0], round((by+bh)/scale_y)+170)
+        if right-left < 40 or bottom-top < 40:
+            result.append(candidate)
+            continue
+        local = weak[top:bottom, left:right]
+        directional = np.zeros_like(local)
+        for orientation in orientations:
+            kernel = np.zeros((17, 17), np.uint8)
+            radians = np.radians(orientation)
+            dx, dy = round(np.cos(radians)*8), round(np.sin(radians)*8)
+            cv2.line(kernel, (8-dx, 8-dy), (8+dx, 8+dy), 1, 1)
+            directional |= cv2.morphologyEx(local, cv2.MORPH_OPEN, kernel)
+        count, labels, stats, centroids = cv2.connectedComponentsWithStats(directional, 8)
+        if count < 2:
+            result.append(candidate)
+            continue
+        original_mask = np.zeros_like(local)
+        cv2.fillPoly(original_mask, [np.rint(points-[left, top]).astype(np.int32)], 1)
+        overlap = np.bincount(labels[cv2.dilate(original_mask, np.ones((7, 7), np.uint8)) > 0].ravel(),
+                              minlength=count)
+        overlap[0] = 0
+        seed = int(np.argmax(overlap))
+        if overlap[seed] < 5 or stats[seed, cv2.CC_STAT_AREA] < 35:
+            result.append(candidate)
+            continue
+
+        def component_axis(label):
+            yy, xx = np.nonzero(labels == label)
+            covariance = np.cov(np.column_stack((xx, yy)).T)
+            values, vectors_local = np.linalg.eigh(covariance)
+            return vectors_local[:, 1], values[1] / max(values[0], .01)
+
+        seed_axis, seed_ratio = component_axis(seed)
+        if seed_ratio < 3:
+            result.append(candidate)
+            continue
+        seed_points = cv2.findContours(np.uint8(labels == seed), cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)[0][0].reshape(-1, 2)
+        chosen = None
+        best_extension = 0.
+        for label in range(1, count):
+            if label == seed or stats[label, cv2.CC_STAT_AREA] < 25:
+                continue
+            x, y, width, height, _ = map(int, stats[label])
+            gap = max(0, x - stats[seed, 0] - stats[seed, 2],
+                      stats[seed, 0] - x - width,
+                      y - stats[seed, 1] - stats[seed, 3],
+                      stats[seed, 1] - y - height)
+            if gap > 65:
+                continue
+            region = labels[y:y+height, x:x+width] == label
+            if float(np.mean(repeated[top+y:top+y+height, left+x:left+x+width][region])) >= .75:
+                continue
+            other_axis, ratio = component_axis(label)
+            if ratio < 3 or abs(float(other_axis @ seed_axis)) < .83:
+                continue
+            separation = centroids[label] - centroids[seed]
+            if abs(float(separation @ seed_axis)) < np.linalg.norm(separation) * .94:
+                continue
+            extra = abs(float(separation @ seed_axis)) + max(width, height) / 2
+            if extra < 30 or extra <= best_extension:
+                continue
+            other_points = cv2.findContours(np.uint8(labels == label), cv2.RETR_EXTERNAL,
+                                            cv2.CHAIN_APPROX_SIMPLE)[0][0].reshape(-1, 2)
+            bridge = _ridge_bridge(gray[top:bottom, left:right], response[top:bottom, left:right],
+                                   authored[top:bottom, left:right], seed_points, other_points, 70)
+            if (bridge is not None and
+                    float(np.mean(response[top+bridge[:, 1], left+bridge[:, 0]])) >= 28):
+                chosen = label, bridge
+                best_extension = extra
+        original_left = bx/scale_x-left
+        original_right = (bx+bw)/scale_x-left
+        seed_left = float(stats[seed, cv2.CC_STAT_LEFT])
+        seed_right = seed_left + float(stats[seed, cv2.CC_STAT_WIDTH])
+        seed_extension = max(original_left-seed_left, seed_right-original_right)
+        if chosen is None and seed_extension < 25:
+            result.append(candidate)
+            continue
+        other, bridge = chosen if chosen is not None else (None, None)
+        footprint = original_mask.copy()
+
+        def centerline(label):
+            yy, xx = np.nonzero(labels == label)
+            # The selected diagonal tears have x as their major axis. A median
+            # across each column follows the fissure, not its broad dark halo.
+            xs = np.unique(xx)
+            return np.asarray([(int(x), int(np.median(yy[xx == x]))) for x in xs], np.int32)
+
+        for label in (seed, other) if other is not None else (seed,):
+            line = centerline(label)
+            if len(line) >= 2:
+                cv2.polylines(footprint, [line], False, 1, 3)
+        if bridge is not None:
+            cv2.polylines(footprint, [bridge], False, 1, 3)
+            # Attach the bridge endpoints to their component centerlines; both
+            # connectors lie within the observed dark components.
+            for label, endpoint in ((seed, bridge[0]), (other, bridge[-1])):
+                line = centerline(label)
+                nearest = line[np.argmin(np.sum((line-endpoint)**2, axis=1))]
+                cv2.line(footprint, tuple(endpoint), tuple(nearest), 1, 3)
+        footprint[authored[top:bottom, left:right] == 0] = 0
+        contours, _ = cv2.findContours(footprint, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if len(contours) != 1:
+            result.append(candidate)
+            continue
+        contour = cv2.approxPolyDP(contours[0], .8, True).reshape(-1, 2) + [left, top]
+        polygon = [[round(float(x)*scale_x, 1), round(float(y)*scale_y, 1)] for x, y in contour]
+        x, y, width, height = cv2.boundingRect(contour)
+        bbox = [round(x*scale_x, 1), round(y*scale_y, 1),
+                round(width*scale_x, 1), round(height*scale_y, 1)]
+        if _polygon_area(polygon) <= _polygon_area(candidate['polygon']) * 1.2:
+            result.append(candidate)
+            continue
+        result.append(dict(candidate, polygon=polygon, bbox=bbox,
+                           area_mm2=round(_polygon_area(polygon)/pixels_per_mm**2, 2),
+                           length_mm=round(max(width*scale_x, height*scale_y)/pixels_per_mm, 1),
+                           detection_basis='extended_dark_ridge',
+                           suggestion_reason='검은 균열에서 시작해 같은 방향의 어두운 선을 영상 근거로 연결했습니다.'))
+    return result
+
+
 def propose_cracks(result_dir, group_id, sensitivity='normal'):
     """Regenerate dark-core candidates while retaining explicit human review."""
     if sensitivity not in {'low', 'normal', 'high'}:
@@ -886,18 +1122,35 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
     fine = _fine_dark_candidates(original, authored, mask, zones, group,
                                  candidates, sensitivity)
     candidates.extend(fine)
+    candidates.extend(_compact_dark_loss_candidates(
+        gray, binary, raw_response, anomaly, repeated_support, mask, authored,
+        group, scale_x, scale_y, ppm, core_limit, candidates))
     candidates = [item for item in candidates
                   if not _is_sprocket_relief(item, hole_band, anchor_positions,
                                              pitch_spacing, scale_x, scale_y, h)
                   and not (item['suggested_damage_type'] == 'chunk'
-                           and item['area_mm2'] < CHUNK_MIN_AREA_MM2)
+                           and item['area_mm2'] < CHUNK_MIN_AREA_MM2
+                           and item.get('detection_basis') != 'compact_dark_loss')
                   and (item['area_mm2'] < 10 or
                        _black_core_fraction(original, item, core_limit) >= .20)
                   and not _persistent_vertical_shadow(
                       original, item, ppm, zones['pitch_px'], core_limit)
+                  and not (item.get('detection_basis') == 'compact_dark_loss'
+                           and hole_band
+                           and hole_band[0] <= (item['bbox'][1]+item['bbox'][3]/2)/scale_y <= hole_band[1]
+                           and np.min(np.abs(anchor_positions -
+                                             (item['bbox'][0]+item['bbox'][2]/2)/scale_x))
+                           < pitch_spacing*.25)
                   and min(item['bbox'][0], item['bbox'][1],
                           original.shape[1] - item['bbox'][0] - item['bbox'][2],
                           original.shape[0] - item['bbox'][1] - item['bbox'][3]) >= 2]
+    candidates = _directional_tear_extensions(
+        candidates, gray, raw_response, authored, repeated_support,
+        scale_x, scale_y, ppm, hole_band)
+    tears = [item for item in candidates if item['damage_type'] == 'tear']
+    candidates = ([item for item in candidates if item['damage_type'] != 'tear'] +
+                  _merge_continuous_candidates(tears, gray, raw_response, authored,
+                                               scale_x, scale_y, ppm))
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = candidates[:400]
     if previous and previous.get('group_id') == group_id and previous.get('zone_created_at') == zones['created_at']:

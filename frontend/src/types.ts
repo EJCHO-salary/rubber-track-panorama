@@ -167,6 +167,7 @@ export interface CrackReview {
   summary?: Record<string, { proposed: number; accepted: number; excluded: number; length_mm: number; area_mm2: number }>
   totals?: { proposed: number; accepted: number; excluded: number; length_mm: number; area_mm2: number }
   accepted_by_type?: Record<'chunk' | 'tear' | 'unclassified', number>
+  accepted_area_by_type?: Record<'chunk' | 'tear', number>
   chunk_min_area_mm2?: number
   last_review?: { selected: number; auto_accepted: number }
 }

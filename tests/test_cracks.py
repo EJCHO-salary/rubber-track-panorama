@@ -9,7 +9,6 @@ from track_unwrap import api
 from track_unwrap.cracks import (_anomaly_candidates, _automatic_candidate, _dark_fissure_mask,
                                  _filter_recurrent_anomalies, _fine_dark_candidates,
                                  _is_sprocket_relief,
-                                 _material_change_candidates,
                                  _periodic_dark_anomaly, _polygon_overlap_fraction,
                                  _repeated_structure_support,
                                  _repair_narrow_authored_seams, _ridge_bridge,
@@ -78,23 +77,25 @@ def test_batch_classification_and_area_rule_preserve_explicit_decisions(tmp_path
         return {'id': cid, 'section_id': 'surface', 'polygon': [[0, 0], [4, 0], [4, 4]],
                 'bbox': [0, 0, 4, 4], 'area_mm2': area, 'length_mm': 4, 'score': .5,
                 'status': status, 'source': source}
-    review = {'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866'}],
+    review = {'version': 2, 'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866'}],
               'pixels_per_mm': 1, 'candidates': [candidate('reference', 10), candidate('bigger', 15),
                 candidate('smaller', 9), candidate('ruled_out', 20, 'excluded'),
                 candidate('manual', 25, 'accepted', 'manual')]}
     (folder / 'review.json').write_text(json.dumps(review), encoding='utf-8')
     result = review_cracks(tmp_path, ['reference'], 'accepted', 'chunk', True)
     by_id = {item['id']: item for item in result['candidates']}
-    assert result['last_review'] == {'selected': 1, 'auto_accepted': 0}
+    assert result['last_review'] == {'selected': 1, 'auto_accepted': 1}
     assert (by_id['reference']['status'], by_id['reference']['damage_type'], by_id['reference']['decision_source']) == ('accepted', 'chunk', 'manual')
     assert by_id['bigger']['status'] == 'accepted' and by_id['bigger']['decision_source'] == 'auto'
-    assert by_id['smaller']['status'] == 'accepted' and by_id['smaller']['decision_source'] == 'auto'
+    assert by_id['smaller']['status'] == 'pending' and by_id['smaller']['decision_source'] is None
     assert by_id['ruled_out']['status'] == 'excluded'
     assert by_id['manual']['status'] == 'accepted' and by_id['manual']['damage_type'] is None
-    assert result['accepted_by_type'] == {'chunk': 3, 'tear': 0, 'unclassified': 1}
+    assert result['accepted_by_type'] == {'chunk': 2, 'tear': 0, 'unclassified': 1}
+    assert result['accepted_area_by_type'] == {'chunk': 25, 'tear': 0}
     changed = review_cracks(tmp_path, ['bigger', 'smaller'], 'excluded')
     assert changed['totals']['excluded'] == 3
     assert changed['accepted_by_type']['chunk'] == 1
+    assert changed['accepted_area_by_type']['chunk'] == 10
     assert load_cracks(tmp_path)['candidates'][1]['decision_source'] == 'manual'
 
 
@@ -210,16 +211,16 @@ def test_damage_type_hint_requires_geometry_and_exposed_edge():
     assert _suggest_damage_type(120, 13, 1.5, .05)[0] == 'chunk'
 
 
-def test_compact_damage_uses_100_square_mm_as_automatic_count_threshold():
+def test_automatic_candidate_records_type_before_size_filtering():
     polygon = [[0, 0], [10, 0], [10, 10], [0, 10]]
     def proposal(area):
         return _automatic_candidate('surface', polygon, [0, 0, 10, 10], area, 4, 20, .7,
-                                    'chunk', 'compact loss', 'material_change')
-    assert proposal(99.99)['status'] == 'pending' and proposal(99.99)['damage_type'] is None
+                                    'chunk', 'compact loss', 'dark_core')
+    assert proposal(99.99)['status'] == 'accepted' and proposal(99.99)['damage_type'] == 'chunk'
     assert proposal(100)['status'] == 'accepted' and proposal(100)['damage_type'] == 'chunk'
 
 
-def test_small_automatic_loss_waits_for_review_and_legacy_manual_decision_survives(tmp_path):
+def test_small_automatic_loss_is_removed_and_legacy_manual_decision_survives(tmp_path):
     folder = tmp_path / 'cracks'
     folder.mkdir()
     def candidate(identifier, source):
@@ -235,33 +236,42 @@ def test_small_automatic_loss_waits_for_review_and_legacy_manual_decision_surviv
     migrated = load_cracks(tmp_path)
     assert migrated['version'] == 2
     assert migrated['chunk_min_area_mm2'] == 100
-    assert migrated['totals']['accepted'] == 2 and migrated['totals']['proposed'] == 1
+    assert migrated['totals']['accepted'] == 2 and migrated['totals']['proposed'] == 0
     by_id = {item['id']: item for item in migrated['candidates']}
-    assert by_id['auto']['status'] == 'pending' and by_id['auto']['suggested_damage_type'] == 'chunk'
-    assert by_id['auto']['damage_type'] is None
+    assert 'auto' not in by_id
     assert by_id['user']['status'] == 'accepted' and by_id['user']['damage_type'] == 'chunk'
     assert by_id['tear_override']['damage_type'] == 'tear'
-    accepted = review_crack(tmp_path, 'auto', 'accepted', 'chunk')
-    assert accepted['totals']['accepted'] == 3 and accepted['accepted_by_type']['chunk'] == 2
-    assert load_cracks(tmp_path)['totals']['proposed'] == 0
+    assert migrated['accepted_area_by_type'] == {'chunk': 64, 'tear': 64}
 
 
-def test_material_change_keeps_small_compact_loss_for_review():
+def test_chalk_colour_change_does_not_produce_automatic_chunk(tmp_path):
     color = np.full((120, 500, 3), 155, np.uint8)
-    cv2.rectangle(color, (180, 42), (199, 61), (75, 105, 162), -1)
-    cv2.line(color, (180, 45), (180, 58), (45, 45, 45), 2)
-    gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
-    authored = np.ones(gray.shape, np.uint8)
-    sections = np.ones_like(authored)
-    zones = {'pitch_anchors_x': list(range(0, 501, 50))}
-    group = {'sections': [{'id': 'surface'}]}
-    candidates = _material_change_candidates(color, gray, authored, sections, zones,
-                                             group, 1., 1., 2.5, 'normal', [])
-    assert any(item['bbox'][0] <= 195 <= item['bbox'][0]+item['bbox'][2]
-               and item['status'] == 'pending' and item['suggested_damage_type'] == 'chunk'
-               for item in candidates)
-    assert all(item['status'] == 'pending' and item['damage_type'] is None
-               for item in candidates)
+    cv2.putText(color, '10', (180, 60), cv2.FONT_HERSHEY_SIMPLEX, 1., (235, 235, 235), 3)
+    cv2.imwrite(str(tmp_path / 'panorama.png'), color)
+    (tmp_path / 'quality_report.json').write_text(json.dumps({
+        'settings': {'width_mm': 48, 'pitch_mm': 20, 'pixels_per_mm': 2.5},
+    }), encoding='utf-8')
+    _test_zones(tmp_path, [[0, 0], [499, 0], [499, 119], [0, 119]])
+    result = propose_cracks(tmp_path, 'geometry')
+    assert not any(item['damage_type'] == 'chunk' for item in result['candidates'])
+    assert not any(item['detection_basis'] == 'material_change' for item in result['candidates'])
+    assert result['totals']['proposed'] == 0
+
+
+def test_legacy_material_only_proposals_are_retired_without_losing_manual_override(tmp_path):
+    folder = tmp_path / 'cracks'
+    folder.mkdir()
+    candidate = {'section_id': 'surface', 'polygon': [[0, 0], [20, 0], [20, 20], [0, 20]],
+                 'bbox': [0, 0, 20, 20], 'area_mm2': 400, 'length_mm': 20,
+                 'source': 'automatic', 'status': 'accepted', 'damage_type': 'chunk',
+                 'suggested_damage_type': 'chunk', 'detection_basis': 'material_change'}
+    review = {'version': 2, 'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866'}],
+              'pixels_per_mm': 1, 'candidates': [dict(candidate, id='auto', decision_source='auto'),
+                                               dict(candidate, id='edited', decision_source='manual')]}
+    (folder / 'review.json').write_text(json.dumps(review), encoding='utf-8')
+    result = load_cracks(tmp_path)
+    assert [item['id'] for item in result['candidates']] == ['edited']
+    assert result['accepted_area_by_type']['chunk'] == 400
 
 
 def test_drawn_line_and_closed_area_classify_and_refine_in_place(tmp_path, monkeypatch):

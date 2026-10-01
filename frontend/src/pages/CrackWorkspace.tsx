@@ -204,8 +204,6 @@ export default function CrackWorkspace() {
           <strong>표시 색상</strong>
           <span><i className={styles.chunkDot} /> 청크</span>
           <span><i className={styles.acceptedDot} /> 티어</span>
-          <span><i className={styles.pendingDot} /> 검토 필요</span>
-          <span><i className={styles.selectionDot} /> 선택 중</span>
         </div>
         {showSettings && <div className={styles.settingsBar}>
           <label>분류 체계<select value={groupId} onChange={event => setGroupId(event.target.value)}>{zones.data.groups.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
@@ -251,8 +249,7 @@ export default function CrackWorkspace() {
       <aside className={styles.sidePanel}>
         <div className={styles.sideTitle}><span>LIVE SUMMARY</span><strong>손상 집계</strong><small>자동 분류는 초안이며 이미지에서 바로 수정할 수 있습니다.</small></div>
         <div className={styles.stats}><div><strong>{formatNumber(data.totals?.accepted ?? 0)}</strong><small>집계</small></div><div><strong>{formatNumber(autoCount)}</strong><small>자동 분류</small></div><div><strong>{formatNumber(editedCount)}</strong><small>사용자 수정</small></div></div>
-        {(data.totals?.proposed ?? 0) > 0 && <p className={styles.pendingNote}>{formatNumber(data.totals!.proposed)}개 후보가 검토를 기다립니다. 자동으로 찾은 1 cm² 미만 덩어리형 손상은 채택 전까지 집계하지 않습니다.</p>}
-        <div className={styles.typeCounts}><strong>손상 유형</strong>{damageTypes.map(item => <div key={item.id}><span>{item.label}</span><b>{data.accepted_by_type?.[item.id] ?? 0}</b></div>)}</div>
+        <div className={styles.typeCounts}><strong>손상 유형별 집계</strong>{damageTypes.map(item => <div key={item.id}><span>{item.label}</span><b>{formatNumber(data.accepted_by_type?.[item.id] ?? 0)}건 <small>· {formatNumber(data.accepted_area_by_type?.[item.id] ?? 0)} mm²</small></b></div>)}</div>
         <div className={styles.sectionCounts}><strong>영역별 집계</strong>{data.sections?.map(section => <div key={section.id}><span><i style={{ background: section.color }} />{section.name}</span><small title="후보별 표시 면적 합계입니다. 겹친 윤곽은 중복될 수 있습니다.">{data.summary?.[section.id]?.accepted ?? 0}건 · {formatNumber(data.summary?.[section.id]?.area_mm2 ?? 0)} mm²</small></div>)}</div>
         <p className={styles.sideNote}>후보는 사진 판독을 돕는 초안입니다. 검은 홈·그림자와 실제 고무 균열은 사진을 보며 구분해 주세요.</p>
       </aside>
@@ -271,7 +268,7 @@ export default function CrackWorkspace() {
       <div className={styles.popupHeader}><div><span>{popup.kind === 'candidate' ? 'SELECTED REGION' : 'IMAGE SELECTION'}</span><strong>{popup.kind === 'candidate' ? '이 영역 판정' : popup.candidateId ? '균열 경계 수정' : '새 균열 추출'}</strong></div>
         <button onClick={() => setPopup(null)} aria-label="팝업 닫기"><X size={17} /></button></div>
       {popup.kind === 'candidate' && candidate && <>
-        <p className={styles.popupMeta}>{data.sections?.find(item => item.id === candidate.section_id)?.name} · {candidate.area_mm2?.toFixed(1)} mm² · {candidate.status === 'pending' ? '검토 필요' : candidate.decision_source === 'auto' ? '자동 분류' : '사용자 수정'}</p>
+        <p className={styles.popupMeta}>{data.sections?.find(item => item.id === candidate.section_id)?.name} · {candidate.area_mm2?.toFixed(1)} mm² · {candidate.status === 'pending' ? '미집계' : candidate.decision_source === 'auto' ? '자동 분류' : '사용자 수정'}</p>
         <p className={styles.popupHelp}>{candidate.suggestion_reason ?? '유형을 누르면 집계가 즉시 수정됩니다.'}</p>
         <div className={styles.popupTypes}>{damageTypes.map(type => <button key={type.id} disabled={busy}
           className={candidate.status === 'accepted' && candidate.damage_type === type.id ? styles.typeActive : ''}

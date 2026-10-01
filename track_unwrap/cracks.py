@@ -4,6 +4,7 @@ The proposed class and area are image measurements, not a depth measurement.
 """
 import json
 import heapq
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -25,13 +26,14 @@ def _paths(result_dir):
     return folder, folder / 'review.json'
 
 
-def _short_automatic_tear(item):
-    """Keep explicit user decisions, but discard undersized automatic tears."""
+def _automatic_tear_outside_range(item, minimum_mm, maximum_mm):
+    """Keep explicit user decisions, but enforce configured automatic tear lengths."""
     return (item.get('source') == 'automatic'
             and item.get('decision_source') != 'manual'
             and item.get('status') != 'excluded'
             and item.get('damage_type') == 'tear'
-            and item.get('length_mm', 0) < TEAR_MIN_LENGTH_MM)
+            and (item.get('length_mm', 0) < minimum_mm
+                 or maximum_mm is not None and item.get('length_mm', 0) > maximum_mm))
 
 
 def load_cracks(result_dir):
@@ -39,6 +41,8 @@ def load_cracks(result_dir):
     if not path.is_file():
         return None
     data = json.loads(path.read_text(encoding='utf-8'))
+    tear_min_mm = data.get('tear_min_length_mm', TEAR_MIN_LENGTH_MM)
+    tear_max_mm = data.get('tear_max_length_mm')
     ppm = data.get('pixels_per_mm')
     if not ppm:
         zones = load_zones(result_dir)
@@ -78,7 +82,7 @@ def load_cracks(result_dir):
     # including chalk and lighting. A user-drawn or explicitly reviewed mark
     # is always retained, even when smaller than the automatic size threshold.
     data['candidates'] = [item for item in data.get('candidates', [])
-                          if not _short_automatic_tear(item)
+                          if not _automatic_tear_outside_range(item, tear_min_mm, tear_max_mm)
                           and not (item.get('source') == 'automatic'
                                   and item.get('decision_source') != 'manual'
                                   and item.get('status') != 'excluded'
@@ -114,7 +118,8 @@ def _write(result_dir, data):
 
 def _summary(data):
     data['chunk_min_area_mm2'] = CHUNK_MIN_AREA_MM2
-    data['tear_min_length_mm'] = TEAR_MIN_LENGTH_MM
+    data.setdefault('tear_min_length_mm', TEAR_MIN_LENGTH_MM)
+    data.setdefault('tear_max_length_mm', None)
     sections = {item['id']: {'proposed': 0, 'accepted': 0, 'excluded': 0,
                              'length_mm': 0., 'area_mm2': 0.}
                 for item in data['sections']}
@@ -1014,10 +1019,17 @@ def _directional_tear_extensions(candidates, gray, response, authored, repeated,
     return result
 
 
-def propose_cracks(result_dir, group_id, sensitivity='normal'):
+def propose_cracks(result_dir, group_id, sensitivity='normal',
+                   tear_min_length_mm=TEAR_MIN_LENGTH_MM, tear_max_length_mm=None):
     """Regenerate dark-core candidates while retaining explicit human review."""
     if sensitivity not in {'low', 'normal', 'high'}:
         raise ValueError('민감도는 low, normal, high 중 하나여야 합니다.')
+    if not math.isfinite(tear_min_length_mm) or tear_min_length_mm < 0:
+        raise ValueError('티어 길이 하한은 0 mm 이상이어야 합니다.')
+    if (tear_max_length_mm is not None
+            and (not math.isfinite(tear_max_length_mm)
+                 or tear_max_length_mm < tear_min_length_mm)):
+        raise ValueError('티어 길이 상한은 하한 이상이어야 합니다.')
     zones = load_zones(result_dir)
     if not zones:
         raise ValueError('먼저 영역을 지정해 주세요.')
@@ -1165,7 +1177,8 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
                                                scale_x, scale_y, ppm))
     # Join adjacent fissure fragments first, then enforce the physical length
     # threshold on the resulting automatic candidates.
-    candidates = [item for item in candidates if not _short_automatic_tear(item)]
+    candidates = [item for item in candidates if not _automatic_tear_outside_range(
+        item, tear_min_length_mm, tear_max_length_mm)]
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = candidates[:400]
     if previous and previous.get('group_id') == group_id and previous.get('zone_created_at') == zones['created_at']:
@@ -1196,6 +1209,8 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
     data = {'version': 2, 'created_at': datetime.now(timezone.utc).isoformat(), 'zone_created_at': zones['created_at'],
             'group_id': group_id, 'sensitivity': sensitivity, 'image_size_wh': zones['image_size_wh'],
             'pixels_per_mm': ppm,
+            'tear_min_length_mm': tear_min_length_mm,
+            'tear_max_length_mm': tear_max_length_mm,
             'sections': [{'id': section['id'], 'name': section['name'], 'color': section['color']} for section in group['sections']],
             'candidates': candidates, 'dismissed_candidates': dismissed}
     return _write(result_dir, _summary(data))

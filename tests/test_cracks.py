@@ -378,6 +378,34 @@ def test_automatic_tears_below_one_centimeter_are_not_counted(tmp_path):
     assert loaded['accepted_by_type']['tear'] == 2
 
 
+def test_configured_tear_length_range_keeps_manual_review(tmp_path):
+    folder = tmp_path / 'cracks'
+    folder.mkdir()
+    base = {'section_id': 'surface', 'polygon': [[0, 0], [20, 0], [20, 2], [0, 2]],
+            'bbox': [0, 0, 20, 2], 'area_mm2': 2, 'status': 'accepted',
+            'source': 'automatic', 'damage_type': 'tear', 'suggested_damage_type': 'tear'}
+    review = {'version': 2, 'sections': [{'id': 'surface', 'name': '표면', 'color': '#668866'}],
+              'pixels_per_mm': 2.5, 'tear_min_length_mm': 5, 'tear_max_length_mm': 20,
+              'candidates': [dict(base, id='too_short', length_mm=4.9, decision_source='auto'),
+                             dict(base, id='lower_limit', length_mm=5, decision_source='auto'),
+                             dict(base, id='upper_limit', length_mm=20, decision_source='auto'),
+                             dict(base, id='too_long', length_mm=20.1, decision_source='auto'),
+                             dict(base, id='long_reviewed', length_mm=21, decision_source='manual')]}
+    (folder / 'review.json').write_text(json.dumps(review), encoding='utf-8')
+    loaded = load_cracks(tmp_path)
+    assert (loaded['tear_min_length_mm'], loaded['tear_max_length_mm']) == (5, 20)
+    assert {item['id'] for item in loaded['candidates']} == {
+        'lower_limit', 'upper_limit', 'long_reviewed'}
+    assert loaded['accepted_by_type']['tear'] == 3
+
+
+def test_tear_length_range_validation_is_applied_before_detection(tmp_path):
+    with pytest.raises(ValueError, match='하한'):
+        propose_cracks(tmp_path, 'geometry', tear_min_length_mm=-1)
+    with pytest.raises(ValueError, match='상한'):
+        propose_cracks(tmp_path, 'geometry', tear_min_length_mm=10, tear_max_length_mm=9.9)
+
+
 def test_chalk_colour_change_does_not_produce_automatic_chunk(tmp_path):
     color = np.full((120, 500, 3), 155, np.uint8)
     cv2.putText(color, '10', (180, 60), cv2.FONT_HERSHEY_SIMPLEX, 1., (235, 235, 235), 3)
@@ -708,10 +736,15 @@ def test_clear_all_candidates_then_repropose_from_current_detector(tmp_path, mon
         assert zone_path.exists()
         assert client.delete(f'/api/jobs/{job_id}/cracks').status_code == 200
 
-        fresh = client.post(f'/api/jobs/{job_id}/cracks/propose', json={'group_id': 'geometry', 'sensitivity': 'high'}).json()
+        fresh = client.post(f'/api/jobs/{job_id}/cracks/propose', json={
+            'group_id': 'geometry', 'sensitivity': 'high',
+            'tear_min_length_mm': 5, 'tear_max_length_mm': 100}).json()
         assert fresh['candidates']
+        assert (fresh['tear_min_length_mm'], fresh['tear_max_length_mm']) == (5, 100)
         assert fresh['totals']['excluded'] == 0 and fresh['totals']['accepted'] > 0
         assert all(item['status'] == 'accepted' and item['damage_type'] for item in fresh['candidates'])
+        assert all(5 <= item['length_mm'] <= 100 for item in fresh['candidates']
+                   if item['source'] == 'automatic' and item['damage_type'] == 'tear')
 
 
 def test_only_drawn_area_produces_crack_candidates(tmp_path):

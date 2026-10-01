@@ -23,6 +23,8 @@ export default function CrackWorkspace() {
   const review = useQuery({ queryKey: ['cracks', id], queryFn: () => api.cracks(id) })
   const [groupId, setGroupId] = useState('geometry')
   const [sensitivity, setSensitivity] = useState<'low' | 'normal' | 'high'>('normal')
+  const [tearMinInput, setTearMinInput] = useState('10')
+  const [tearMaxInput, setTearMaxInput] = useState('')
   const [showSettings, setShowSettings] = useState(false)
   const [showZones, setShowZones] = useState(false)
   const [popup, setPopup] = useState<Popup | null>(null)
@@ -69,7 +71,8 @@ export default function CrackWorkspace() {
 
   function save(data: CrackReview) { queryClient.setQueryData(['cracks', id], data); setError('') }
   const proposal = useMutation({
-    mutationFn: () => api.proposeCracks(id, groupId, sensitivity),
+    mutationFn: (range: { min: number; max: number | null }) =>
+      api.proposeCracks(id, groupId, sensitivity, range.min, range.max),
     onSuccess: data => { save(data); setPopup(null); setShowSettings(false); setNotice('후보를 다시 찾았습니다.') },
     onError: (cause: Error) => setError(cause.message),
   })
@@ -142,6 +145,31 @@ export default function CrackWorkspace() {
       .catch((cause: Error) => setError(cause.message))
   }
 
+  function toggleSettings() {
+    if (!showSettings) {
+      setGroupId(review.data?.group_id ?? 'geometry')
+      setSensitivity(review.data?.sensitivity ?? 'normal')
+      setTearMinInput(String(review.data?.tear_min_length_mm ?? 10))
+      setTearMaxInput(review.data?.tear_max_length_mm == null ? '' : String(review.data.tear_max_length_mm))
+    }
+    setShowSettings(value => !value)
+  }
+
+  function findCandidates() {
+    const min = Number(tearMinInput)
+    const max = tearMaxInput.trim() === '' ? null : Number(tearMaxInput)
+    if (tearMinInput.trim() === '' || !Number.isFinite(min) || min < 0) {
+      setError('티어 길이 하한은 0 mm 이상의 숫자로 입력해 주세요.')
+      return
+    }
+    if (max !== null && (!Number.isFinite(max) || max < min)) {
+      setError('티어 길이 상한은 하한 이상으로 입력하거나 비워 주세요.')
+      return
+    }
+    setError('')
+    proposal.mutate({ min, max })
+  }
+
   function selectCandidates(ids: string[], shift: boolean, bounds: [number, number, number, number]) {
     setPopup(null)
     setSelectedIds(current => toggleSelection(current, ids, shift))
@@ -197,7 +225,7 @@ export default function CrackWorkspace() {
           <div className={styles.imageTools}>
             <label><input type="checkbox" checked={showZones} onChange={event => setShowZones(event.target.checked)} /> 영역</label>
             {drawing && <button type="button" onClick={stopDrawing}><X size={14} /> 그리기 취소</button>}
-            <button type="button" className={showSettings ? styles.toolActive : ''} onClick={() => setShowSettings(value => !value)}><Settings2 size={14} /> 자동 탐색 설정</button>
+            <button type="button" className={showSettings ? styles.toolActive : ''} onClick={toggleSettings}><Settings2 size={14} /> 자동 탐색 설정</button>
           </div>
         </div>
         <div className={styles.topLegend} aria-label="손상 유형 색상 범례">
@@ -208,7 +236,9 @@ export default function CrackWorkspace() {
         {showSettings && <div className={styles.settingsBar}>
           <label>분류 체계<select value={groupId} onChange={event => setGroupId(event.target.value)}>{zones.data.groups.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
           <label>민감도<select value={sensitivity} onChange={event => setSensitivity(event.target.value as typeof sensitivity)}><option value="low">낮음</option><option value="normal">보통</option><option value="high">높음</option></select></label>
-          <button onClick={() => proposal.mutate()} disabled={busy}><ScanSearch size={14} /> {proposal.isPending ? '탐색 중…' : '후보 다시 찾기'}</button>
+          <label>티어 하한 (mm)<input type="number" min="0" step="0.1" value={tearMinInput} onChange={event => setTearMinInput(event.target.value)} /></label>
+          <label>티어 상한 (mm)<input type="number" min="0" step="0.1" placeholder="제한 없음" value={tearMaxInput} onChange={event => setTearMaxInput(event.target.value)} /></label>
+          <button onClick={findCandidates} disabled={busy}><ScanSearch size={14} /> {proposal.isPending ? '탐색 중…' : '후보 다시 찾기'}</button>
           <button className={styles.clearAll} onClick={clearAll} disabled={busy}><Trash2 size={14} /> 전체 초기화</button>
         </div>}
         {data.stale && <div className={styles.stale}>영역 지도가 변경되었습니다. 자동 탐색 설정에서 후보를 다시 찾아 주세요.</div>}
@@ -247,7 +277,7 @@ export default function CrackWorkspace() {
         </div>
       </section>
       <aside className={styles.sidePanel}>
-        <div className={styles.sideTitle}><span>LIVE SUMMARY</span><strong>손상 집계</strong><small>자동 티어는 길이 {formatNumber(data.tear_min_length_mm ?? 10)} mm 이상만 집계합니다. 작은 손상은 사진에서 직접 지정할 수 있습니다.</small></div>
+        <div className={styles.sideTitle}><span>LIVE SUMMARY</span><strong>손상 집계</strong><small>자동 티어 길이 {formatNumber(data.tear_min_length_mm ?? 10)} mm 이상{data.tear_max_length_mm == null ? '' : ` · ${formatNumber(data.tear_max_length_mm)} mm 이하`}. 범위 밖 손상은 사진에서 직접 지정할 수 있습니다.</small></div>
         <div className={styles.stats}><div><strong>{formatNumber(data.totals?.accepted ?? 0)}</strong><small>집계</small></div><div><strong>{formatNumber(autoCount)}</strong><small>자동 분류</small></div><div><strong>{formatNumber(editedCount)}</strong><small>사용자 수정</small></div></div>
         <div className={styles.typeCounts}><strong>손상 유형별 집계</strong>{damageTypes.map(item => <div key={item.id}><span>{item.label}</span><b>{formatNumber(data.accepted_by_type?.[item.id] ?? 0)}건 <small>· {formatNumber(data.accepted_area_by_type?.[item.id] ?? 0)} mm²</small></b></div>)}</div>
         <div className={styles.sectionCounts}><strong>영역별 집계</strong>{data.sections?.map(section => <div key={section.id}><span><i style={{ background: section.color }} />{section.name}</span><small title="후보별 표시 면적 합계입니다. 겹친 윤곽은 중복될 수 있습니다.">{data.summary?.[section.id]?.accepted ?? 0}건 · {formatNumber(data.summary?.[section.id]?.area_mm2 ?? 0)} mm²</small></div>)}</div>

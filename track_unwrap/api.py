@@ -253,6 +253,8 @@ class ZoneHalfTurn(BaseModel):
 class CrackProposal(BaseModel):
     group_id: str
     sensitivity: str = 'normal'
+    tear_min_length_mm: float = 10.
+    tear_max_length_mm: float | None = None
 
 
 class CrackReview(BaseModel):
@@ -514,7 +516,9 @@ def propose_job_cracks(job_id: str, request: CrackProposal):
     result_dir = _zones_dir(job_id)
     with _zone_lock(job_id):
         try:
-            return {**propose_cracks(result_dir, request.group_id, request.sensitivity), 'ready': True, 'stale': False}
+            return {**propose_cracks(result_dir, request.group_id, request.sensitivity,
+                                     request.tear_min_length_mm, request.tear_max_length_mm),
+                    'ready': True, 'stale': False}
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 

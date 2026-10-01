@@ -239,7 +239,7 @@ def test_drawn_line_and_closed_area_classify_and_refine_in_place(tmp_path, monke
     assert line['candidates'][0]['damage_type'] == 'tear'
     small = add_manual_crack(tmp_path, [[105, 105], [125, 105], [125, 125], [105, 125]], closed=True)
     assert small['candidates'][0]['damage_type'] == 'chip_cut'
-    assert small['candidates'][0]['area_mm2'] < 100
+    assert small['candidates'][0]['area_mm2'] == 64
     identifier = small['candidates'][0]['id']
     large = add_manual_crack(tmp_path, [[105, 105], [145, 105], [145, 145], [105, 145]],
                              closed=True, candidate_id=identifier)
@@ -258,6 +258,28 @@ def test_drawn_line_and_closed_area_classify_and_refine_in_place(tmp_path, monke
     assert response.json()['accepted_by_type']['chunk'] == 1
     with pytest.raises(ValueError, match='손상 면적'):
         add_manual_crack(tmp_path, [[210, 100], [220, 100], [230, 100]], closed=True)
+
+
+def test_manual_damage_crosses_small_unlabeled_seam_but_not_large_opening(tmp_path):
+    image = np.full((200, 200, 3), 155, np.uint8)
+    cv2.imwrite(str(tmp_path / 'panorama.png'), image)
+    (tmp_path / 'quality_report.json').write_text(json.dumps({
+        'settings': {'width_mm': 80, 'pitch_mm': 20, 'pixels_per_mm': 2.5},
+    }), encoding='utf-8')
+    _test_zones(tmp_path, [[0, 0], [199, 0], [199, 199], [0, 199]])
+    propose_cracks(tmp_path, 'geometry')
+    authored_path = tmp_path / 'zones' / 'group_geometry_authored.png'
+    authored = cv2.imread(str(authored_path), cv2.IMREAD_GRAYSCALE)
+    authored[20:110, 55:58] = 0  # A narrow gap between drawn region polygons.
+    authored[30:120, 110:170] = 0  # A genuinely unmarked opening.
+    cv2.imwrite(str(authored_path), authored)
+    line = add_manual_crack(tmp_path, [[40, 45], [70, 75]])
+    assert line['candidates'][0]['damage_type'] == 'tear'
+    closed = add_manual_crack(tmp_path,
+                              [[40, 50], [73, 50], [73, 85], [40, 85]], closed=True)
+    assert closed['candidates'][0]['status'] == 'accepted'
+    with pytest.raises(ValueError, match='지정된 영역에서 너무 멉니다'):
+        add_manual_crack(tmp_path, [[125, 40], [145, 90]])
 
 
 def test_guided_selection_bridges_short_gap_without_neighbor_and_offsets_outline():

@@ -1029,6 +1029,23 @@ def _repair_narrow_authored_seams(authored, pixels_per_mm):
     return cv2.bitwise_or(across_rows, across_columns)
 
 
+def _manual_near_authored(footprint, authored, pixels_per_mm):
+    """Allow a hand-drawn damage outline to cross small region-map gaps.
+
+    Automatic detection still uses the exact authored mask. The manual path
+    must mostly cover a drawn region and never stray more than 2.5 mm from it,
+    so this does not make large unmarked openings eligible for drawing.
+    """
+    selected = footprint > 0
+    count = int(np.count_nonzero(selected))
+    if not count or np.count_nonzero(selected & (authored > 0)) / count < .5:
+        return False
+    radius = max(1, int(round(2.5 * pixels_per_mm)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
+    nearby = cv2.dilate(np.uint8(authored > 0), kernel)
+    return not np.any(selected & (nearby == 0))
+
+
 def trace_crack(result_dir, point, damage_type, offset_mm, tolerance=55, candidate_id=None,
                 apply=False, seed_radius_px=18, region=None, accept=False):
     """Preview or persist a Photoshop-like seeded crack selection."""
@@ -1256,21 +1273,26 @@ def add_manual_crack(result_dir, points, closed=False, candidate_id=None):
     work_points = np.rint(path * [sx, sy]).astype(np.int32)
     centerline = np.zeros_like(mask)
     cv2.polylines(centerline, [work_points], bool(closed), 255, 1)
-    if np.any((centerline > 0) & (authored == 0)):
-        raise ValueError('수동 균열 경로는 지정된 영역 안에 그려 주세요.')
+    working_ppm = zones['nominal_pixels_per_mm'] * min(sx, sy)
+    if not _manual_near_authored(centerline, authored, working_ppm):
+        raise ValueError('그린 경로가 지정된 영역에서 너무 멉니다. 영역 지도를 확인해 주세요.')
     raster = np.zeros_like(mask)
     if closed:
         cv2.fillPoly(raster, [work_points], 255)
     else:
         cv2.polylines(raster, [work_points], False, 255, 3)
-    if np.any((raster > 0) & (authored == 0)):
-        raise ValueError('그린 손상 영역은 지정된 영역 안에 있어야 합니다.')
-    section_pixels = mask[raster > 0]
+    if not _manual_near_authored(raster, authored, working_ppm):
+        raise ValueError('그린 손상 영역이 지정된 영역에서 너무 멉니다. 영역 지도를 확인해 주세요.')
+    # Pixels from filled gaps carry the default section, not a user decision.
+    section_pixels = mask[(raster > 0) & (authored > 0)]
     code = int(np.bincount(section_pixels, minlength=len(data['sections'])+1)[1:].argmax() + 1)
     contours, _ = cv2.findContours(raster, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contour = cv2.approxPolyDP(max(contours, key=cv2.contourArea), 1., True).reshape(-1, 2)
     x, y, bw, bh = cv2.boundingRect(contour)
-    area_mm2 = round(_polygon_area(contour) / (sx * sy * zones['nominal_pixels_per_mm'] ** 2), 2)
+    # For a closed hand-drawn boundary, measure the original image-space path.
+    # The coarse zone raster can otherwise shift a 1 cm² decision at the edge.
+    area_mm2 = round(_polygon_area(path) / zones['nominal_pixels_per_mm'] ** 2, 2) if closed else round(
+        _polygon_area(contour) / (sx * sy * zones['nominal_pixels_per_mm'] ** 2), 2)
     if closed and area_mm2 < .5:
         raise ValueError('닫힌 경계 안쪽에 손상 면적이 있어야 합니다. 경계를 한 바퀴 둘러 그려 주세요.')
     damage_type = ('tear' if not closed else 'chunk' if area_mm2 >= 100 else 'chip_cut')
@@ -1290,8 +1312,6 @@ def add_manual_crack(result_dir, points, closed=False, candidate_id=None):
                       'length_mm': round(length_px / zones['nominal_pixels_per_mm'], 1),
                       'area_mm2': area_mm2,
                       'bbox': [round(x/sx, 1), round(y/sy, 1), round(bw/sx, 1), round(bh/sy, 1)]})
-    if not _inside_authored(candidate, authored, 1 / sx, 1 / sy):
-        raise ValueError('수동 균열 경로는 지정된 영역 안에 그려 주세요.')
     return _write(result_dir, _summary(data))
 
 

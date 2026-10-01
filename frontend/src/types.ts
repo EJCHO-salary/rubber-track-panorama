@@ -136,11 +136,13 @@ export interface CrackCandidate {
 
 export interface CrackTraceRequest {
   point: Point | null
+  region?: [number, number, number, number] | null
   candidate_id: string | null
   damage_type: 'chunk' | 'tear' | 'chip_cut'
   offset_mm: number
   tolerance: number
   seed_radius_px: number
+  accept?: boolean
 }
 
 export interface CrackTracePreview {

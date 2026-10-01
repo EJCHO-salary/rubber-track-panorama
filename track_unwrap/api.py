@@ -18,7 +18,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, StrictInt
 
 from .zones import assist_polygon, build_zones, list_zone_instances, load_zones, suggest_half_turn
-from .cracks import (add_manual_crack, clear_cracks, delete_manual_crack,
+from .cracks import (add_manual_crack, clear_cracks, delete_crack,
                      load_cracks, propose_cracks, review_crack, review_cracks,
                      trace_crack)
 from .pipeline import Settings, unwrap
@@ -271,11 +271,13 @@ class ManualCrack(BaseModel):
 
 class GuidedCrackSelection(BaseModel):
     point: list[float] | None = None
+    region: list[float] | None = None
     candidate_id: str | None = None
     damage_type: str
     offset_mm: float = Field(ge=0, le=5)
     tolerance: int = Field(ge=15, le=100)
     seed_radius_px: int = Field(default=18, ge=1, le=320)
+    accept: bool = False
 
 
 @app.post('/api/jobs', status_code=202)
@@ -518,7 +520,7 @@ def preview_crack_trace(job_id: str, request: GuidedCrackSelection):
         try:
             return trace_crack(result_dir, request.point, request.damage_type,
                                request.offset_mm, request.tolerance, request.candidate_id,
-                               seed_radius_px=request.seed_radius_px)
+                               seed_radius_px=request.seed_radius_px, region=request.region)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -530,7 +532,8 @@ def apply_crack_trace(job_id: str, request: GuidedCrackSelection):
         try:
             return {**trace_crack(result_dir, request.point, request.damage_type,
                                   request.offset_mm, request.tolerance, request.candidate_id,
-                                  apply=True, seed_radius_px=request.seed_radius_px),
+                                  apply=True, seed_radius_px=request.seed_radius_px,
+                                  region=request.region, accept=request.accept),
                     'ready': True, 'stale': False}
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -576,11 +579,11 @@ def add_job_manual_crack(job_id: str, request: ManualCrack):
 
 
 @app.delete('/api/jobs/{job_id}/cracks/{candidate_id}')
-def delete_job_manual_crack(job_id: str, candidate_id: str):
+def delete_job_crack(job_id: str, candidate_id: str):
     result_dir = _zones_dir(job_id)
     with _zone_lock(job_id):
         try:
-            return {**delete_manual_crack(result_dir, candidate_id), 'ready': True, 'stale': False}
+            return {**delete_crack(result_dir, candidate_id), 'ready': True, 'stale': False}
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 

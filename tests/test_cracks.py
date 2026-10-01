@@ -8,14 +8,26 @@ from fastapi.testclient import TestClient
 from track_unwrap import api
 from track_unwrap.cracks import (_anomaly_candidates, _dark_fissure_mask,
                                  _filter_recurrent_anomalies, _fine_dark_candidates,
+                                 _is_sprocket_relief,
                                  _periodic_dark_anomaly, _polygon_overlap_fraction,
                                  _repeated_structure_support,
                                  _repair_narrow_authored_seams, _ridge_bridge,
                                  _trace_dark_component,
                                  _suggest_damage_type, add_manual_crack,
-                                 delete_manual_crack, load_cracks, propose_cracks,
+                                 delete_crack, delete_manual_crack, load_cracks, propose_cracks,
                                  review_crack, review_cracks, trace_crack)
 from track_unwrap.zones import build_zones
+
+
+def test_sprocket_lip_and_wall_are_not_damage_candidates():
+    # Measured geometry from the 450 mm review photo: the first rectangle is
+    # its dark horizontal hole lip, the second is a vertical opening wall.
+    anchors = np.array([36., 169., 288., 411., 533., 656., 786., 911., 2392.])
+    geometry = lambda box: _is_sprocket_relief({'bbox': box}, (275, 361),
+                                                anchors, 125., 3.5, 3.5, 643)
+    assert geometry([126., 895.8, 199.5, 66.5])
+    assert geometry([8344., 1025.3, 17.5, 185.5])
+    assert not geometry([260., 1015., 45., 95.])  # irregular fissure beside the hole
 
 
 def _test_zones(folder, polygon=None):
@@ -323,6 +335,42 @@ def test_guided_refinement_can_extend_beyond_old_candidate_box(tmp_path):
     (tmp_path / 'cracks' / 'review.json').write_text(json.dumps(review), encoding='utf-8')
     preview = trace_crack(tmp_path, None, 'tear', 0, 20, candidate_id='truncated')
     assert preview['bbox'][1] + preview['bbox'][3] >= 295
+
+
+def test_dragged_dark_region_can_be_extracted_and_accepted(tmp_path):
+    image = np.full((220, 420, 3), 150, np.uint8)
+    cv2.line(image, (75, 35), (75, 170), (10, 10, 10), 4)
+    cv2.line(image, (325, 35), (325, 170), (10, 10, 10), 4)
+    cv2.imwrite(str(tmp_path / 'panorama.png'), image)
+    (tmp_path / 'quality_report.json').write_text(json.dumps({
+        'settings': {'width_mm': 80, 'pitch_mm': 20, 'pixels_per_mm': 2.5},
+    }), encoding='utf-8')
+    _test_zones(tmp_path, [[0, 0], [210, 0], [210, 219], [0, 219]])
+    propose_cracks(tmp_path, 'geometry', 'normal')
+    preview = trace_crack(tmp_path, None, 'tear', 0, 30, region=[55, 25, 95, 190])
+    assert preview['bbox'][0] < 75 < preview['bbox'][0] + preview['bbox'][2]
+    assert preview['bbox'][0] + preview['bbox'][2] < 210
+    saved = trace_crack(tmp_path, None, 'tear', 0, 30, region=[55, 25, 95, 190], apply=True, accept=True)
+    assert saved['totals']['accepted'] == 1
+    assert saved['candidates'][0]['damage_type'] == 'tear'
+    with pytest.raises(ValueError, match='지정된 분석 영역 밖'):
+        trace_crack(tmp_path, None, 'tear', 0, 30, region=[300, 25, 350, 190])
+
+
+def test_deleted_automatic_candidate_stays_removed_after_reproposal(tmp_path):
+    image = np.full((180, 400, 3), 150, np.uint8)
+    cv2.line(image, (75, 35), (75, 145), (10, 10, 10), 4)
+    cv2.imwrite(str(tmp_path / 'panorama.png'), image)
+    (tmp_path / 'quality_report.json').write_text(json.dumps({
+        'settings': {'width_mm': 80, 'pitch_mm': 20, 'pixels_per_mm': 2.5},
+    }), encoding='utf-8')
+    _test_zones(tmp_path, [[0, 0], [399, 0], [399, 179], [0, 179]])
+    first = propose_cracks(tmp_path, 'geometry', 'high')
+    target = first['candidates'][0]
+    deleted = delete_crack(tmp_path, target['id'])
+    assert target['id'] not in {item['id'] for item in deleted['candidates']}
+    again = propose_cracks(tmp_path, 'geometry', 'high')
+    assert not any(abs(item['bbox'][0] - target['bbox'][0]) < 10 for item in again['candidates'])
 
 
 def test_reproposal_keeps_reviewed_candidate_and_manual_path(tmp_path):

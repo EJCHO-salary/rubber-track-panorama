@@ -23,8 +23,10 @@ type Props = {
   onSegmentMove: (shapeId: string, placement: number, offset: Point) => void
   crackCandidates?: CrackCandidate[]
   selectedCrackIds?: string[]
-  onCrackSelect?: (id: string, shift: boolean) => void
+  onCrackSelect?: (id: string, shift: boolean, screen: Point, point: Point) => void
   onCrackMarquee?: (ids: string[], shift: boolean) => void
+  onCrackRegion?: (region: [number, number, number, number], screen: Point) => void
+  onCrackEmpty?: (point: Point, screen: Point) => void
   tracePicking?: boolean
   tracePolygon?: Point[] | null
   traceSeed?: Point | null
@@ -43,7 +45,7 @@ type Props = {
 
 export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, closedShapes, selectedVertex, opacity,
   focusShape, suggestedPolygon, segmentInstances, adjustingSegments, selectedSegment, onSegmentSelect, onSegmentMove,
-  crackCandidates = [], selectedCrackIds = [], onCrackSelect, onCrackMarquee,
+  crackCandidates = [], selectedCrackIds = [], onCrackSelect, onCrackMarquee, onCrackRegion, onCrackEmpty,
   tracePicking = false, tracePolygon, traceSeed, onCrackSeed, hint,
   onAdd, onInsert, onMoveStart, onMove, onSelect, onDelete, onClose, onClosedMove, onClosedDelete }: Props) {
   const host = useRef<HTMLDivElement>(null)
@@ -61,6 +63,7 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
   const [failed, setFailed] = useState(false)
   const [size, setSize] = useState({ width: 1, height: 1 })
   const selectionStart = useRef<{ id: number; point: Point; candidateId: string | null; shift: boolean } | null>(null)
+  const suppressCrackClick = useRef(false)
   const [selectionEnd, setSelectionEnd] = useState<Point | null>(null)
   const [, render] = useState(0)
 
@@ -95,7 +98,7 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId])
 
-  const selectingCracks = Boolean(onCrackMarquee) && !editing
+  const selectingCracks = Boolean(onCrackMarquee || onCrackRegion || onCrackEmpty || onCrackSelect) && !editing
   useEffect(() => { viewer.current?.setMouseNavEnabled(!(editing || selectingCracks)) }, [editing, selectingCracks])
 
   useEffect(() => {
@@ -131,7 +134,9 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
   function startCrackSelection(event: React.PointerEvent<SVGSVGElement>) {
     if (!selectingCracks || event.button !== 0) return
     const target = event.target as Element
-    const candidateId = target.closest('[data-crack-id]')?.getAttribute('data-crack-id') ?? null
+    const hit = document.elementFromPoint(event.clientX, event.clientY)
+    const candidateId = hit?.closest('[data-crack-id]')?.getAttribute('data-crack-id')
+      ?? target.closest('[data-crack-id]')?.getAttribute('data-crack-id') ?? null
     selectionStart.current = { id: event.pointerId, point: overlayPoint(event), candidateId, shift: event.shiftKey }
     setSelectionEnd(null)
     event.currentTarget.setPointerCapture(event.pointerId)
@@ -145,12 +150,18 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     const start = selectionStart.current
     if (!start || start.id !== event.pointerId) return
     const end = overlayPoint(event)
+    const dragged = Math.hypot(end[0] - start.point[0], end[1] - start.point[1]) > 4
+    suppressCrackClick.current = dragged
     if (tracePicking) {
       if (Math.hypot(end[0] - start.point[0], end[1] - start.point[1]) <= 4) {
         const point = unproject(event)
         if (point) onCrackSeed?.(point, start.candidateId, imageRadiusForScreenPixels(20))
       }
-    } else if (Math.hypot(end[0] - start.point[0], end[1] - start.point[1]) > 4) {
+    } else if (dragged && onCrackRegion) {
+      const first = unprojectScreen(start.point), last = unprojectScreen(end)
+      if (first && last) onCrackRegion([Math.min(first[0], last[0]), Math.min(first[1], last[1]),
+        Math.max(first[0], last[0]), Math.max(first[1], last[1])], [event.clientX, event.clientY])
+    } else if (dragged) {
       const bounds = [Math.min(start.point[0], end[0]), Math.min(start.point[1], end[1]),
         Math.max(start.point[0], end[0]), Math.max(start.point[1], end[1])]
       const ids = crackCandidates.filter(item => {
@@ -159,8 +170,15 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
         return a[0] <= bounds[2] && b[0] >= bounds[0] && a[1] <= bounds[3] && b[1] >= bounds[1]
       }).map(item => item.id)
       onCrackMarquee?.(ids, start.shift)
-    } else if (start.candidateId) onCrackSelect?.(start.candidateId, start.shift)
-    else if (!start.shift) onCrackMarquee?.([], false)
+    } else if (start.candidateId) {
+      const point = unproject(event)
+      if (point) onCrackSelect?.(start.candidateId, start.shift, [event.clientX, event.clientY], point)
+    }
+    else if (!start.shift) {
+      const point = unproject(event)
+      if (point && onCrackEmpty) onCrackEmpty(point, [event.clientX, event.clientY])
+      else onCrackMarquee?.([], false)
+    }
     selectionStart.current = null
     setSelectionEnd(null)
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
@@ -195,6 +213,13 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
     const [width, height] = analysis.image_size_wh
     if (mapped.x < 0 || mapped.x >= width || mapped.y < 0 || mapped.y >= height) return null
     return [Math.round(mapped.x), Math.round(mapped.y)]
+  }
+  function unprojectScreen(point: Point): Point | null {
+    if (!viewer.current) return null
+    const mapped = viewer.current.viewport.viewerElementToImageCoordinates(new OpenSeadragon.Point(...point))
+    const [width, height] = analysis.image_size_wh
+    return [Math.max(0, Math.min(width - 1, Math.round(mapped.x))),
+      Math.max(0, Math.min(height - 1, Math.round(mapped.y)))]
   }
   function rawImagePoint(event: React.PointerEvent): Point {
     const rect = host.current!.getBoundingClientRect()
@@ -289,7 +314,18 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
       style={{ pointerEvents: editing || selectingCracks ? 'auto' : 'none', cursor: panning ? 'grabbing' : editing || selectingCracks ? 'crosshair' : 'default' }}
       onPointerDown={startCrackSelection} onPointerMove={moveCrackSelection} onPointerUp={endCrackSelection}
       onPointerCancel={() => { selectionStart.current = null; setSelectionEnd(null) }}
-      onClick={event => { const point = unproject(event); if (editing && event.button === 0 && point) onAdd(point) }}>
+      onClick={event => {
+        const point = unproject(event)
+        if (editing && event.button === 0 && point) { onAdd(point); return }
+        if (suppressCrackClick.current) { suppressCrackClick.current = false; return }
+        if (selectingCracks && point) {
+          // Pointer capture retargets the click to the SVG root. Resolve the
+          // visible polygon under the cursor after release as a fallback.
+          const id = document.elementFromPoint(event.clientX, event.clientY)
+            ?.closest('[data-crack-id]')?.getAttribute('data-crack-id')
+          if (id) onCrackSelect?.(id, event.shiftKey, [event.clientX, event.clientY], point)
+        }
+      }}>
       {groupId && <image href={`${zoneFileBase(jobId, groupId)}/overlay.png?v=${encodeURIComponent(analysis.created_at)}`}
         x={left[0]} y={left[1]} width={right[0]-left[0]} height={right[1]-left[1]}
         preserveAspectRatio="none" opacity={opacity} pointerEvents="none" />}
@@ -318,6 +354,7 @@ export default function ZoneCanvas({ jobId, groupId, analysis, editing, points, 
         if (cx < -15 || cx > size.width + 15 || cy < -15 || cy > size.height + 15) return null
         const selected = selectedCrackIds.includes(candidate.id)
         return <g key={candidate.id} data-crack-id={candidate.id} style={{ cursor: selectingCracks ? 'crosshair' : 'pointer' }}>
+          <polygon points={polygon(candidate.polygon)} fill="transparent" stroke="transparent" strokeWidth="14" pointerEvents="stroke" />
           <polygon points={polygon(candidate.polygon)} className={selected ? styles.crackAreaSelected : candidate.status === 'accepted' ? styles.crackAreaAccepted : candidate.status === 'excluded' ? styles.crackAreaExcluded : styles.crackAreaPending} />
         </g>
       })}

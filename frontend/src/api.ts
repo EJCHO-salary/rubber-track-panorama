@@ -50,7 +50,7 @@ export const api = {
   addManualCrack: (id: string, points: Point[]) => request<CrackReview>(`/api/jobs/${id}/cracks/manual`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points }),
   }),
-  deleteManualCrack: (id: string, candidateId: string) => request<CrackReview>(`/api/jobs/${id}/cracks/${candidateId}`, { method: 'DELETE' }),
+  deleteCrack: (id: string, candidateId: string) => request<CrackReview>(`/api/jobs/${id}/cracks/${candidateId}`, { method: 'DELETE' }),
 }
 
 export function fileBase(jobId: string) { return `/api/jobs/${jobId}/files` }

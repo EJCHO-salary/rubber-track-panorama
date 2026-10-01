@@ -364,6 +364,30 @@ def _anomaly_candidates(gray, raw_response, anomaly, mask, authored, group,
     return proposals
 
 
+def _is_sprocket_relief(candidate, hole_band, anchors, pitch_spacing, scale_x, scale_y, image_height):
+    """Reject the molded horizontal lip and vertical wall around a repeated hole.
+
+    Both can be near-black and locally anomalous, so darkness alone cannot
+    distinguish them from a fissure. Keep this check common to every proposal
+    pass, including the high-recall anomaly and fine-detail passes.
+    """
+    if not hole_band or not len(anchors):
+        return False
+    x, y, width, height = candidate['bbox']
+    cx, cy = (x + width / 2) / scale_x, (y + height / 2) / scale_y
+    bw, bh = width / scale_x, height / scale_y
+    near_anchor = float(np.min(np.abs(anchors - cx))) < pitch_spacing * .32
+    if not near_anchor:
+        return False
+    rim_distance = min(abs(cy - hole_band[0]), abs(cy - hole_band[1]))
+    horizontal_lip = bw > bh * 1.8 and rim_distance < max(5, image_height * .025)
+    inside_hole_band = hole_band[0] < cy < hole_band[1]
+    vertical_wall = (inside_hole_band and bh > bw * 4 and
+                     bh > (hole_band[1] - hole_band[0]) * .48 and
+                     float(np.min(np.abs(anchors - cx))) < pitch_spacing * .12)
+    return horizontal_lip or vertical_wall
+
+
 def _filter_recurrent_anomalies(candidates, anchors, pitch_px, image_height, sensitivity,
                                 minimum_score=None):
     """Reject dark relief repeated at the same place in several pitches.
@@ -749,20 +773,27 @@ def propose_cracks(result_dir, group_id, sensitivity='normal'):
     distinct = [item for item in fine if (item.get('repeated_structure_score') or 0) < .70]
     candidates.extend(distinct + _filter_recurrent_anomalies(
         stable, zones['pitch_anchors_x'], zones['pitch_px'], original.shape[0], sensitivity, 0.))
+    candidates = [item for item in candidates
+                  if not _is_sprocket_relief(item, hole_band, anchor_positions,
+                                             pitch_spacing, scale_x, scale_y, h)]
     candidates.sort(key=lambda item: item['score'] * max(1, item['length_mm']) ** .5, reverse=True)
     candidates = candidates[:400]
     if previous and previous.get('group_id') == group_id and previous.get('zone_created_at') == zones['created_at']:
+        dismissed = previous.get('dismissed_candidates', [])
         preserved = [item for item in previous['candidates']
                      if (item['status'] != 'pending' or item.get('selection_source') == 'guided')
                      and (item.get('selection_source') == 'guided'
                           or _inside_authored(item, authored, scale_x, scale_y))]
         candidates = preserved + [item for item in candidates
-                                  if not any(_same_damage_location(item, saved) for saved in preserved)]
+                                  if not any(_same_damage_location(item, saved) for saved in preserved)
+                                  and not any(_same_damage_location(item, saved) for saved in dismissed)]
+    else:
+        dismissed = []
     data = {'version': 1, 'created_at': datetime.now(timezone.utc).isoformat(), 'zone_created_at': zones['created_at'],
             'group_id': group_id, 'sensitivity': sensitivity, 'image_size_wh': zones['image_size_wh'],
             'pixels_per_mm': ppm,
             'sections': [{'id': section['id'], 'name': section['name'], 'color': section['color']} for section in group['sections']],
-            'candidates': candidates}
+            'candidates': candidates, 'dismissed_candidates': dismissed}
     return _write(result_dir, _summary(data))
 
 
@@ -837,7 +868,7 @@ def _repair_narrow_authored_seams(authored, pixels_per_mm):
 
 
 def trace_crack(result_dir, point, damage_type, offset_mm, tolerance=55, candidate_id=None,
-                apply=False, seed_radius_px=18):
+                apply=False, seed_radius_px=18, region=None, accept=False):
     """Preview or persist a Photoshop-like seeded crack selection."""
     if damage_type not in DAMAGE_TYPES:
         raise ValueError('손상 유형이 올바르지 않습니다.')
@@ -858,7 +889,15 @@ def trace_crack(result_dir, point, damage_type, offset_mm, tolerance=55, candida
     if original is None or authored is None or sections is None:
         raise ValueError('전개 사진 또는 지정 영역을 읽을 수 없습니다.')
     image_h, image_w = original.shape
-    if point is not None:
+    if region is not None:
+        if len(region) != 4 or not all(np.isfinite(value) for value in region):
+            raise ValueError('드래그 영역을 확인해 주세요.')
+        rx0, ry0, rx1, ry1 = map(float, region)
+        if not (0 <= rx0 < rx1 <= image_w and 0 <= ry0 < ry1 <= image_h and
+                rx1-rx0 >= 3 and ry1-ry0 >= 3 and (rx1-rx0)*(ry1-ry0) <= 1_000_000):
+            raise ValueError('드래그 영역을 사진 안에서 더 작게 지정해 주세요.')
+        center_x, center_y = (rx0+rx1)/2, (ry0+ry1)/2
+    elif point is not None:
         if len(point) != 2 or not all(np.isfinite(value) for value in point):
             raise ValueError('선택 위치를 확인해 주세요.')
         center_x, center_y = map(float, point)
@@ -873,7 +912,11 @@ def trace_crack(result_dir, point, damage_type, offset_mm, tolerance=55, candida
     reach = round(ppm * 95)
     left, top = max(0, round(center_x)-reach), max(0, round(center_y)-reach)
     right, bottom = min(image_w, round(center_x)+reach+1), min(image_h, round(center_y)+reach+1)
-    if candidate:
+    if region is not None:
+        margin = round(ppm * 10)
+        left, top = max(0, min(left, int(rx0)-margin)), max(0, min(top, int(ry0)-margin))
+        right, bottom = min(image_w, max(right, int(rx1)+margin)), min(image_h, max(bottom, int(ry1)+margin))
+    elif candidate:
         bx, by, bw, bh = candidate['bbox']
         margin = round(ppm * 15)
         left, top = max(0, min(left, int(bx)-margin)), max(0, min(top, int(by)-margin))
@@ -885,7 +928,11 @@ def trace_crack(result_dir, point, damage_type, offset_mm, tolerance=55, candida
     # The seed guides a local selection. A dark lug edge must not flood across
     # several pitches just because its shadow touches the chosen fissure.
     growth = np.zeros(gray.shape, np.uint8)
-    if candidate:
+    if region is not None:
+        margin = round(ppm * 10)
+        gx0, gy0 = max(0, int(rx0)-margin-left), max(0, int(ry0)-margin-top)
+        gx1, gy1 = min(gray.shape[1], int(rx1)+margin-left), min(gray.shape[0], int(ry1)+margin-top)
+    elif candidate:
         bx, by, bw, bh = candidate['bbox']
         if damage_type == 'tear':
             # A truncated proposal should be allowed to follow the same thin
@@ -906,7 +953,22 @@ def trace_crack(result_dir, point, damage_type, offset_mm, tolerance=55, candida
         gx1, gy1 = min(gray.shape[1], round(center_x)+allowance-left+1), min(gray.shape[0], round(center_y)+allowance-top+1)
     growth[gy0:gy1, gx0:gx1] = 1
     valid = np.uint8((valid > 0) & (growth > 0))
-    if candidate and point is None:
+    if region is not None:
+        sx0, sy0 = max(0, int(rx0)-left), max(0, int(ry0)-top)
+        sx1, sy1 = min(gray.shape[1], int(rx1)-left+1), min(gray.shape[0], int(ry1)-top+1)
+        search = np.zeros(gray.shape, bool)
+        search[sy0:sy1, sx0:sx1] = True
+        search &= valid > 0
+        if not np.any(search):
+            raise ValueError('드래그 영역이 지정된 분석 영역 밖입니다.')
+        contrast = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT,
+                                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
+        evidence = contrast.astype(np.float32) + np.maximum(0, 105-gray.astype(np.float32))
+        evidence[~search] = -1
+        sy, sx = np.unravel_index(int(np.argmax(evidence)), evidence.shape)
+        if evidence[sy, sx] < 40:
+            raise ValueError('드래그 영역에서 검은 균열을 찾지 못했습니다. 더 좁게 선택하거나 선 그리기를 사용해 주세요.')
+    elif candidate and point is None:
         polygon = np.rint(np.asarray(candidate['polygon']) - [left, top]).astype(np.int32)
         footprint = np.zeros(gray.shape, np.uint8)
         cv2.fillPoly(footprint, [polygon], 1)
@@ -951,6 +1013,10 @@ def trace_crack(result_dir, point, damage_type, offset_mm, tolerance=55, candida
                       'suggestion_reason': '검은 연결 영역을 선택하고 경계 여유를 적용했습니다.',
                       'selection_source': 'guided', 'selection_offset_mm': offset_mm,
                       'selection_tolerance': tolerance})
+    if accept:
+        candidate['status'] = 'accepted'
+        candidate['damage_type'] = damage_type
+        candidate['decision_source'] = 'manual'
     return _write(result_dir, _summary(data))
 
 
@@ -1052,5 +1118,19 @@ def delete_manual_crack(result_dir, candidate_id):
     candidate = next((item for item in data['candidates'] if item['id'] == candidate_id), None)
     if not candidate or candidate['source'] != 'manual':
         raise ValueError('수동으로 그린 균열만 삭제할 수 있습니다.')
+    data['candidates'] = [item for item in data['candidates'] if item['id'] != candidate_id]
+    return _write(result_dir, _summary(data))
+
+
+def delete_crack(result_dir, candidate_id):
+    """Remove a review candidate and remember the rejection on reproposal."""
+    data = load_cracks(result_dir)
+    if not data:
+        raise ValueError('크랙 후보를 찾을 수 없습니다.')
+    candidate = next((item for item in data['candidates'] if item['id'] == candidate_id), None)
+    if not candidate:
+        raise ValueError('크랙 후보를 찾을 수 없습니다.')
+    data.setdefault('dismissed_candidates', []).append({
+        'id': candidate['id'], 'bbox': candidate['bbox'], 'polygon': candidate['polygon']})
     data['candidates'] = [item for item in data['candidates'] if item['id'] != candidate_id]
     return _write(result_dir, _summary(data))
